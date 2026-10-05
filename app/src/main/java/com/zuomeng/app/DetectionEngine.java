@@ -45,9 +45,9 @@ public class DetectionEngine {
     }
 
     /** 检测点总数：固定 312 项 = 离线 306（第一页）+ 联网 6（第二页），与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 318;
+    public static final int TOTAL = 324;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 312;
+    public static final int TOTAL_OFFLINE = 318;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -1160,6 +1160,34 @@ public class DetectionEngine {
         // 开发者选项中的ADB授权计数
         String adbKeysCount = shExec("ls /data/misc/adb/ 2>/dev/null | wc -l");
         r(cat,"ADB授权密钥数量", adbKeysCount==null?"不可读":adbKeysCount.trim()+"个", 0);
+
+        // ===== Momo风格检测点 =====
+        // su 可执行权限检测：不仅存在，还要检查是否有可执行位
+        String suExec = shExec("which su 2>/dev/null || command -v su 2>/dev/null");
+        r(cat,"su可执行程序检测", suExec==null||suExec.trim().isEmpty()?"未找到su可执行程序":"找到su: "+suExec.trim(), (suExec!=null&&!suExec.trim().isEmpty())?1:0);
+        // Magisk模块修改文件深度检测
+        String magiskMods = shExec("ls /data/adb/modules/ 2>/dev/null | grep -v '^$' | head -10");
+        boolean magiskModHit = magiskMods != null && !magiskMods.trim().isEmpty()
+                && !magiskMods.contains("空") && !magiskMods.contains("不存在");
+        r(cat,"Magisk模块修改文件", magiskModHit?"已安装模块: "+magiskMods.replace('\n',' ').trim():"无Magisk模块", magiskModHit?1:0);
+        // Magisk 核心二进制检测
+        boolean magiskBin = exists("/data/adb/magisk/magisk64") || exists("/data/adb/magisk/magisk32")
+                || exists("/sbin/magisk") || exists("/system/bin/magisk");
+        r(cat,"Magisk核心二进制", magiskBin?"检测到Magisk二进制":"未检测到Magisk", magiskBin?1:0);
+        // 包管理服务异常检测
+        String pmService = shExec("service list 2>/dev/null | grep -i package");
+        boolean pmOk = pmService != null && pmService.contains("package");
+        r(cat,"包管理服务状态", pmOk?"正常(package service存在)":"异常! "+(pmService==null?"无响应":pmService.trim()), pmOk?0:1);
+        // Bootloader 锁定状态综合
+        String flashLocked = prop("ro.boot.flash.locked");
+        String vbState = prop("ro.boot.vbmeta.device_state");
+        boolean blUnlocked = "0".equals(flashLocked) || "unlocked".equals(vbState);
+        r(cat,"Bootloader锁定状态综合", "flash.locked="+flashLocked+" vbmeta="+vbState, blUnlocked?1:0);
+        // 调试模式综合检测
+        boolean debugOn = "1".equals(prop("ro.debuggable"))
+                || "userdebug".equals(prop("ro.build.type"))
+                || "eng".equals(prop("ro.build.type"));
+        r(cat,"调试模式综合状态", "ro.debuggable="+prop("ro.debuggable")+" type="+prop("ro.build.type"), debugOn?1:0);
 
         // /data/app/ 包名交叉验证：文件系统存在 vs PackageManager可见
         // HMA隐藏应用后PackageManager查不到，但APK文件仍在/data/app/下
