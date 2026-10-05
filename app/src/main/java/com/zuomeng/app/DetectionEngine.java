@@ -1914,11 +1914,17 @@ public class DetectionEngine {
                     .getInstalledApplications(PackageManager.GET_DISABLED_COMPONENTS);
             for (ApplicationInfo ai : apps) {
                 if ((ai.flags & ApplicationInfo.FLAG_SYSTEM) == 0) userPkgs.add(ai.packageName);
-                boolean disabled = !ai.enabled
-                        || ai.enabledSetting == ApplicationInfo.ENABLED_STATE_DISABLED
-                        || ai.enabledSetting == ApplicationInfo.ENABLED_STATE_DISABLED_USER
-                        || ai.enabledSetting == ApplicationInfo.ENABLED_STATE_DISABLED_UNTIL_USED;
-                if (disabled) disabledPkgs.add(ai.packageName);
+            }
+            // ③ 系统禁用/冻结/停用：用公开 API getApplicationEnabledSetting 判定（禁用包可能不在常规安装列表）
+            for (ApplicationInfo ai : apps) {
+                try {
+                    int st = ctx.getPackageManager().getApplicationEnabledSetting(ai.packageName);
+                    if (st == PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                            || st == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
+                            || st == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED) {
+                        disabledPkgs.add(ai.packageName);
+                    }
+                } catch (Exception ignored) {}
             }
         } catch (Exception e) {
             return "受限(PackageManager 不可读):" + e.getClass().getSimpleName();
