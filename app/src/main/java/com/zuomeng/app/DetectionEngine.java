@@ -596,7 +596,7 @@ public class DetectionEngine {
         String mockLoc = readSetting("secure","mock_location");
         r(cat,"模拟定位开关", onOff(mockLoc), "1".equals(mockLoc)?1:0);
         String unkSrc = readSetting("secure","install_non_market_apps");
-        r(cat,"未知来源安装", onOff(unkSrc), "1".equals(unkSrc)?2:0);
+        r(cat,"未知来源安装", onOff(unkSrc)+" (Android10+按应用授权,全局开关仅记录)", 0);
         String usbTrace = readSetting("secure","adb_port");
         r(cat,"ADB 端口配置", usbTrace!=null?usbTrace:"未配置", 0);
 
@@ -1393,10 +1393,14 @@ public class DetectionEngine {
             "com.qualcomm.fastdormancy", "com.qualcomm.location", "com.qualcomm.services.location",
             "com.qti.dcvs", "com.qti.perfdump", "com.qti.modem", "com.qualcomm.msim",
             "com.mediatek", "com.mediatek.imscmd", "mediatek", "com.mediatek.ims",
-            "android", "com.android", "com.android.systemui", "com.android.phone",
-            "com.android.settings", "com.android.bluetooth", "com.android.nfc",
-            "com.android.location.fused", "com.android.providers.media",
-            "com.google.android", "com.google.android.gms", "com.google.android.gsf"
+            "vendor.goodix", "vendor.zte", "vendor.btaudio_intermediate", "vendor.nxp",
+            "vendor.huawei", "vendor.oppo", "vendor.vivo", "vendor.xiaomi", "vendor.oneplus",
+            "vendor.nubia", "vendor.redmagic", "android", "com.android",
+            "com.android.systemui", "com.android.phone", "com.android.settings",
+            "com.android.bluetooth", "com.android.nfc", "com.android.location.fused",
+            "com.android.providers.media", "com.google.android", "com.google.android.gms",
+            "com.google.android.gsf", "media.", "telephony.", "drm.", "memtrack.",
+            "android.hardware.", "vendor."
     ));
 
     private boolean pkgKnown(String pkg) {
@@ -1629,15 +1633,19 @@ public class DetectionEngine {
         if (out == null || out.trim().isEmpty()) return "不可读";
         StringBuilder h = new StringBuilder();
         String[] keys = {"magisk","ksu","apatch","frida","xposed","tricky","susfs","zygisk",
-                "spoof","pihooks","pixelprops","superkey","hook","dex2oat","noactive"};
+                "spoof","pihooks","pixelprops","superkey","hook"};
         for (String line : out.split("\n")) {
             String l = line.toLowerCase();
-            for (String k : keys) {
-                if (l.contains(k)) {
-                    String v = line.trim();
-                    if (h.indexOf(v) < 0 && h.length() < 400) h.append(v).append('\n');
-                    break;
-                }
+            // 白名单：ART/dalvik 原生属性不算可疑
+            if (l.contains("dalvik.vm.dex2oat") || l.contains("dalvik.vm.image-dex2oat")) continue;
+            if (l.contains("dalvik.vm.heapsize") || l.contains("dalvik.vm.startup")) continue;
+            boolean hit = false;
+            for (String k : keys) if (l.contains(k)) { hit = true; break; }
+            // dex2oat 单独处理：只查 dex2oat-flags 这种被篡改的标志，不查 Xms/Xmx 等原生参数
+            if (!hit && l.contains("dex2oat") && !l.contains("dex2oat-flags")) continue;
+            if (hit) {
+                String v = line.trim();
+                if (h.indexOf(v) < 0 && h.length() < 400) h.append(v).append('\n');
             }
         }
         return h.length() > 0 ? "命中:\n" + h.toString().trim() : "未见可疑属性";
@@ -1701,11 +1709,11 @@ public class DetectionEngine {
         return "raw netlink socket=" + n + " 个" + (n > 40 ? " (异常偏多)" : "");
     }
 
-    /** zygote 进程链溯源：self→zygote→init，断链 = 容器/注入 */
+    /** zygote 进程链溯源：self→zygote→init，断链 = 容器/注入；Android16 AppZygote 截断不判异常 */
     private String ppidChain() {
         StringBuilder sb = new StringBuilder();
         int pid = android.os.Process.myPid();
-        for (int i = 0; i < 5 && pid > 0; i++) {
+        for (int i = 0; i < 6 && pid > 0; i++) {
             String stat = read("/proc/" + pid + "/stat");
             if (stat == null) break;
             int a = stat.indexOf('('), b = stat.lastIndexOf(')');
@@ -1718,10 +1726,15 @@ public class DetectionEngine {
         }
         String chain = sb.toString();
         boolean ok = chain.contains("zygote") || chain.contains("app_process");
+        // Android16 AppZygote 机制：普通应用读不到完整父链，不判异常
+        boolean truncatedByPermission = chain.length() < 30 && !ok;
+        if (truncatedByPermission) {
+            return chain + " (Android16 AppZygote 链截断,正常)";
+        }
         return chain + (ok ? " (正常 zygote 链)" : " (异常: 未溯源到 zygote)");
     }
 
-    /** OBB 多视图一致性：Java / 路径 / shell 三种视图互相印证 */
+    /** OBB 多视图一致性：Java / 路径 / shell 三种视图互相印证；沙盒权限隔离导致的差异不判异常 */
     private String obbMultiView() {
         try {
             File j = ctx.getObbDir();
@@ -1733,13 +1746,17 @@ public class DetectionEngine {
             boolean b4 = ls != null && !ls.trim().isEmpty();
             int n = (b1 ? 1 : 0) + (b2 ? 1 : 0) + (b3 ? 1 : 0) + (b4 ? 1 : 0);
             if (n == 0 || n == 4) return "OBB 各视图一致(" + n + "/4)";
+            // 普通应用沙盒隔离：/data/media 视图天然不可见，不算拦截
+            if (!b3 && (b1 || b2)) {
+                return "OBB 沙盒视图隔离(java=" + b1 + " /storage=" + b2 + ",/data/media不可见,正常)";
+            }
             return "OBB 视图不一致! java=" + b1 + " /storage=" + b2 + " /data/media=" + b3 + " shell=" + b4 + " → 疑似拦截";
         } catch (Exception e) { return "受限:" + e.getClass().getSimpleName(); }
     }
 
     private static final Pattern SMAPS_ADDR = Pattern.compile("^[0-9a-f]+-[0-9a-f]+ ");
 
-    /** smaps 匿名内存统计：区域数与总 Rss，异常膨胀 = 注入载荷 */
+    /** smaps 匿名内存统计：区域数与总 Rss，异常膨胀 = 注入载荷；大内存机型动态阈值 */
     private String smapsAnonCheck() {
         String s = read("/proc/self/smaps");
         if (s == null) return "不可读";
@@ -1751,11 +1768,12 @@ public class DetectionEngine {
                 if (f.length >= 2) try { rss += Long.parseLong(f[1]); } catch (Exception ignored) {}
             } else if (SMAPS_ADDR.matcher(l).find()) regions++;
         }
-        boolean huge = regions > 2500 || rss > 1500000;
+        // 大内存手机(12GB+)正常 Compose 应用可达 4000+ 区域，阈值提高到 6000
+        boolean huge = regions > 6000 || rss > 2500000;
         return "区域=" + regions + " 总Rss=" + (rss / 1024) + "MB" + (huge ? " → 异常膨胀" : "");
     }
 
-    /** fdinfo mnt_id 采样：fd 的挂载点不在 mountinfo 中 = 挂载被隐藏 */
+    /** fdinfo mnt_id 采样：fd 的挂载点不在 mountinfo 中 = 挂载被隐藏；普通应用权限不足大量读失败不判异常 */
     private String fdinfoMntCheck() {
         String mi = read("/proc/self/mountinfo");
         if (mi == null) return "不可读";
@@ -1767,15 +1785,23 @@ public class DetectionEngine {
         File fdd = new File("/proc/self/fdinfo");
         File[] fs = fdd.listFiles();
         if (fs == null) return "不可读";
-        int bad = 0, total = 0;
+        int bad = 0, total = 0, readable = 0;
         for (File f : fs) {
             String c = read(f.getPath());
             if (c == null) continue;
             total++;
+            boolean hasMntId = false;
             for (String l : c.split("\n")) if (l.startsWith("mnt_id:")) {
+                hasMntId = true;
                 try { int id = Integer.parseInt(l.substring(7).trim()); if (!valid.contains(id)) bad++; } catch (Exception ignored) {}
             }
+            if (hasMntId) readable++;
         }
+        // 权限不足场景：大量 fd 读不到 mnt_id，不判挂载隐藏
+        if (readable == 0) return "fdinfo mnt_id 受限(无权限,正常)";
+        double badRatio = total > 0 ? (double) bad / total : 0;
+        // 超过 70% 异常 = 权限问题，不是真的挂载隐藏
+        if (badRatio > 0.7) return "mnt_id 读取受限(" + bad + "/" + total + " 异常,权限不足,正常)";
         return bad > 0 ? ("mnt_id 异常 " + bad + "/" + total + " 个(挂载被隐藏)") : ("mnt_id 全部一致(" + total + " 个 fd)");
     }
 
