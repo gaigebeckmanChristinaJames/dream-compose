@@ -44,10 +44,10 @@ public class DetectionEngine {
         void onProgress(DetectionResult result, int done, int total, String category, String title);
     }
 
-    /** 检测点总数：固定 294 项 = 离线 288（第一页）+ 联网 6（第二页），与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 294;
+    /** 检测点总数：固定 312 项 = 离线 306（第一页）+ 联网 6（第二页），与 run()/runOnline() 实际输出一致 */
+    public static final int TOTAL = 312;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 288;
+    public static final int TOTAL_OFFLINE = 306;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -993,6 +993,135 @@ public class DetectionEngine {
         r(cat,"构建时间", "date="+prop("ro.build.date")+" utc="+prop("ro.build.date.utc"), 0);
         String up = read("/proc/uptime");
         r(cat,"开机时长", up==null?"不可读":(up.trim().split("\\s+")[0]+" 秒"), 0);
+
+        // ===== 35. 内核深度检测（多源一致性 + 自定义内核特征） =====
+        cat = "内核深度";
+        String uname = shExec("uname -a 2>/dev/null");
+        String procVer = read("/proc/version");
+        String kernelVer = uname != null && !uname.isEmpty() ? uname.trim() : (procVer != null ? procVer.trim() : "不可读");
+        r(cat,"完整内核版本(uname -a)", kernelVer, 0);
+        // 自定义内核标记：emoji/中文/Telegram/@mention
+        StringBuilder kernelSusp = new StringBuilder();
+        if (kernelVer != null) {
+            if (kernelVer.matches(".*[\\x{1F300}-\\x{1F9FF}\\x{2600}-\\x{26FF}].*")) kernelSusp.append("emoji标记 ");
+            if (kernelVer.matches(".*[\\u4e00-\\u9fff].*")) kernelSusp.append("中文字符 ");
+            if (kernelVer.toLowerCase().matches(".*(tg|telegram|@[a-z0-9_]{3,}).*")) kernelSusp.append("TG/提及标记 ");
+            if (kernelVer.toLowerCase().matches(".*(xkernel|custom|wismela|akfn|skyline|blu_spark|elementalx).*")) kernelSusp.append("第三方内核名 ");
+        }
+        r(cat,"自定义内核特征", kernelSusp.length()>0?kernelSusp.toString().trim():"官方内核", kernelSusp.length()>0?2:0);
+        // kptr_restrict
+        String kptr = read("/proc/sys/kernel/kptr_restrict");
+        r(cat,"kptr_restrict", kptr==null?"不可读":kptr.trim(), kptr!=null&&"0".equals(kptr.trim())?2:0);
+        // 内核版本多源一致性
+        String unameR = shExec("uname -r 2>/dev/null");
+        String sysOsrel = read("/proc/sys/kernel/osrelease");
+        String verMismatch = "";
+        if (unameR != null && sysOsrel != null && !unameR.trim().isEmpty() && !sysOsrel.trim().isEmpty()
+                && !unameR.trim().equals(sysOsrel.trim())) {
+            verMismatch = "uname="+unameR.trim()+" vs sysctl="+sysOsrel.trim();
+        }
+        r(cat,"内核版本多源一致性", verMismatch.isEmpty()?"一致":verMismatch, verMismatch.isEmpty()?0:2);
+        // CVE-2024-43093 补丁状态
+        String secPatch = prop("ro.build.version.security_patch");
+        boolean cvePatched = false;
+        if (secPatch != null) {
+            try {
+                String[] parts = secPatch.split("-");
+                if (parts.length >= 2) {
+                    int year = Integer.parseInt(parts[0]);
+                    int month = Integer.parseInt(parts[1]);
+                    cvePatched = year > 2024 || (year == 2024 && month >= 8);
+                }
+            } catch (Exception ignored) {}
+        }
+        r(cat,"CVE-2024-43093补丁", cvePatched?"已修复(patch="+secPatch+")":"可能未修复(patch="+secPatch+")", cvePatched?0:3);
+
+        // ===== 36. SELinux 多通道验证 =====
+        cat = "SELinux增强";
+        // 通道1：文件系统读取 enforce
+        String enforceF = read("/sys/fs/selinux/enforce");
+        // 通道2：getenforce 命令
+        String getEnforce = shExec("getenforce 2>/dev/null");
+        // 通道3：proc/self/attr/current
+        String selfCtx = read("/proc/self/attr/current");
+        // 综合判定
+        int selinuxStatus = 0;
+        String selinuxDetail = "enforce文件="+(enforceF==null?"不可读":enforceF.trim())
+                +" getenforce="+(getEnforce==null?"不可读":getEnforce.trim());
+        if (enforceF != null && "0".equals(enforceF.trim())) selinuxStatus = 1;
+        else if (getEnforce != null && getEnforce.trim().toLowerCase().contains("permissive")) selinuxStatus = 1;
+        else if (getEnforce != null && getEnforce.trim().toLowerCase().contains("disabled")) selinuxStatus = 1;
+        r(cat,"SELinux多通道状态", selinuxDetail, selinuxStatus);
+        // policy 文件存在性
+        boolean policyExists = exists("/sys/fs/selinux/policy");
+        r(cat,"SELinux policy节点", policyExists?"policy节点存在":"policy节点不可读", 0);
+        // load_policy seqno（策略被修改的标志）
+        String loadSeq = read("/sys/fs/selinux/load_policy");
+        r(cat,"SELinux load_policy", loadSeq==null?"不可读":loadSeq.trim(), 0);
+        // 本进程 context 检查
+        boolean ctxSusp = selfCtx != null && (selfCtx.contains("magisk")||selfCtx.contains("ksu")||selfCtx.contains("apatch")||selfCtx.contains(":su:"));
+        r(cat,"本进程SELinux context", selfCtx==null?"不可读":selfCtx.trim(), ctxSusp?1:0);
+
+        // ===== 37. ADB 深度探测（反 HMA 隐藏） =====
+        cat = "ADB深度";
+        // 通道1：全局 settings
+        String adbGlobal = readSetting("global","adb_enabled");
+        // 通道2：adbd socket
+        boolean adbdSocket = exists("/dev/socket/adbd");
+        // 通道3：init.svc.adbd 属性
+        String adbdSvc = prop("init.svc.adbd");
+        // 通道4：ro.adb.secure
+        String adbSecure = prop("ro.adb.secure");
+        // 通道5：service list 中 adb 服务
+        String svcList = shExec("service list 2>/dev/null | grep -i adb");
+        // 通道6：USB 状态
+        String usbState = shExec("cat /sys/class/android_usb/android0/state 2>/dev/null || cat /sys/class/udc/*/state 2>/dev/null");
+        // 综合判定：多个通道交叉验证
+        boolean adbOnByGlobal = "1".equals(adbGlobal);
+        boolean adbOnBySvc = "running".equals(adbdSvc);
+        boolean adbSusp = (adbOnByGlobal || adbOnBySvc) && !"0".equals(adbSecure);
+        r(cat,"ADB多通道状态", "settings="+adbGlobal+" adbd_service="+adbdSvc+" socket="+(adbdSocket?"存在":"无")+" secure="+adbSecure, adbSusp?2:0);
+        r(cat,"adbd socket节点", adbdSocket?"/dev/socket/adbd存在":"无adbd socket", 0);
+        r(cat,"ADB USB状态", usbState==null||usbState.trim().isEmpty()?"不可读":usbState.trim(), 0);
+        // adb_keys 授权文件深度扫描
+        String adbKeysDeep = shExec("ls -la /data/misc/adb/ 2>/dev/null");
+        r(cat,"adb授权目录", adbKeysDeep==null||adbKeysDeep.trim().isEmpty()?"不可读/空":adbKeysDeep.replace('\n',' ').trim(), (adbKeysDeep!=null&&adbKeysDeep.contains("adb_keys")&&!adbKeysDeep.contains("0 0"))?2:0);
+
+        // ===== 38. 深度路径扫描（越权/异常文件） =====
+        cat = "深度路径";
+        // 敏感系统路径扫描
+        String[] sensitivePaths = {
+            "/data/misc/adb/adb_keys", "/data/property", "/dev/__properties__",
+            "/data/adb", "/data/local/tmp", "/data/misc/user/0",
+            "/system/bin/su", "/system/xbin/su", "/sbin/su",
+            "/vendor/bin/su", "/debug_ramdisk", "/data/debug",
+            "/data/nand", "/data/.magic", "/data/.su",
+            "/proc/1/root/system/bin/su"
+        };
+        StringBuilder pathHit = new StringBuilder();
+        for (String p : sensitivePaths) {
+            if (exists(p)) {
+                try {
+                    java.io.File f = new java.io.File(p);
+                    if (f.canRead() && !p.equals("/data/adb") && !p.equals("/data/local/tmp") && !p.equals("/dev/__properties__")) {
+                        pathHit.append(p).append("(可读) ");
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+        r(cat,"敏感路径可读性", pathHit.length()>0?pathHit.toString().trim():"全部不可读(正常)", pathHit.length()>0?2:0);
+        // /proc/1/root 越权探测
+        String proc1Root = shExec("ls /proc/1/root/system/bin/ 2>/dev/null | head -5");
+        r(cat,"/proc/1/root越权探测", proc1Root==null||proc1Root.trim().isEmpty()?"拒绝访问(正常)":"可读! "+proc1Root.replace('\n',' ').trim(), (proc1Root!=null&&!proc1Root.trim().isEmpty())?1:0);
+        // /data 顶层异常文件扫描
+        String dataTop = shExec("ls -la /data/ 2>/dev/null | grep -vE '^d|^total' | head -10");
+        r(cat,"/data顶层异常文件", dataTop==null||dataTop.trim().isEmpty()?"不可读":dataTop.replace('\n',' ').trim(), 0);
+        // /sdcard 隐藏文件扫描
+        String sdcardHidden = shExec("ls -la /sdcard/ 2>/dev/null | grep '^\\.' | head -5");
+        r(cat,"/sdcard隐藏文件", sdcardHidden==null||sdcardHidden.trim().isEmpty()?"无隐藏文件":sdcardHidden.replace('\n',' ').trim(), 0);
+        // 公开路径异常二进制
+        String publicBin = shExec("find /sdcard/Download /sdcard/Documents -maxdepth 2 -type f \\( -name '*.sh' -o -name '*.su' -o -name '*.magisk' -o -name '*.patch' \\) 2>/dev/null | head -5");
+        r(cat,"公开路径异常脚本", publicBin==null||publicBin.trim().isEmpty()?"未见":publicBin.replace('\n',' ').trim(), publicBin!=null&&!publicBin.trim().isEmpty()?2:0);
 
         Report rep = new Report();
         rep.results = results;
