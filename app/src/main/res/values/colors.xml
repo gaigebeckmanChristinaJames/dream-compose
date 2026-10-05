@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ===== Material 3 低饱和浅紫色基色板 ===== -->
+    <color name="primary">#6750A4</color>
+    <color name="onPrimary">#FFFFFF</color>
+    <color name="primaryContainer">#EADDFF</color>
+    <color name="onPrimaryContainer">#21005D</color>
+    <color name="secondary">#625B71</color>
+    <color name="onSecondary">#FFFFFF</color>
+    <color name="secondaryContainer">#E8DEF8</color>
+    <color name="onSecondaryContainer">#1D192B</color>
+    <color name="tertiary">#7D5260</color>
+    <color name="onTertiary">#FFFFFF</color>
+
+    <color name="surface">#FEF7FF</color>
+    <color name="surfaceVariant">#E7E0EC</color>
+    <color name="surfaceContainerLow">#F7F2FA</color>
+    <color name="surfaceContainer">#F3EDF7</color>
+    <color name="surfaceContainerHigh">#ECE6F0</color>
+    <color name="onSurface">#1D1B20</color>
+    <color name="onSurfaceVariant">#49454F</color>
+    <color name="outline">#79747E</color>
+    <color name="outlineVariant">#CAC4D0</color>
+
+    <color name="error">#B3261E</color>
+    <color name="onError">#FFFFFF</color>
+    <color name="errorContainer">#F9DEDC</color>
+    <color name="onErrorContainer">#410E0B</color>
+</resources>

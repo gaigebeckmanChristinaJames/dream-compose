@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material 3 主题：浅色窗口背景与页面浅紫渐变一致，状态/导航栏透明交给 enableEdgeToEdge 处理 -->
+    <style name="Theme.ZuoMeng" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@drawable/bg_gradient</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>
