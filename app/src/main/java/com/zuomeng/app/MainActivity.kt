@@ -203,7 +203,7 @@ fun App() {
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "做梦 · 1.2.12",
+                text = "做梦 · 1.2.13",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -478,7 +478,7 @@ private fun buildReportText(report: DetectionEngine.Report, start: Long): String
         compareBy({ priority(it.level) })
     )
     val sb = StringBuilder()
-    sb.append("环境检测报告 v1.2.12\n")
+    sb.append("环境检测报告 v1.2.13\n")
     sb.append("检测时间：")
         .append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(start)))
         .append("（耗时 ").append(elapsedStr(System.currentTimeMillis() - start)).append("）\n")

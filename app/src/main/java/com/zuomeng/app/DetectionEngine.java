@@ -45,9 +45,9 @@ public class DetectionEngine {
     }
 
     /** 检测点总数：固定 312 项 = 离线 306（第一页）+ 联网 6（第二页），与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 312;
+    public static final int TOTAL = 313;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 306;
+    public static final int TOTAL_OFFLINE = 307;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -1123,6 +1123,15 @@ public class DetectionEngine {
         String publicBin = shExec("find /sdcard/Download /sdcard/Documents -maxdepth 2 -type f \\( -name '*.sh' -o -name '*.su' -o -name '*.magisk' -o -name '*.patch' \\) 2>/dev/null | head -5");
         r(cat,"公开路径异常脚本", publicBin==null||publicBin.trim().isEmpty()?"未见":publicBin.replace('\n',' ').trim(), publicBin!=null&&!publicBin.trim().isEmpty()?2:0);
 
+        // /data/app/ 包名交叉验证：文件系统存在 vs PackageManager可见
+        // HMA隐藏应用后PackageManager查不到，但APK文件仍在/data/app/下
+        String dataAppScan = dataAppPackageCrossCheck();
+        r(cat,"/data/app包名交叉验证(HMA检测)", dataAppScan,
+                dataAppScan.startsWith("风险")?1:(dataAppScan.startsWith("HMA")?2:0));
+        // /etc/ 路径包名交叉验证：系统配置中声明的包名 vs 已安装包名
+        String etcScan = etcPackageCrossCheck();
+        r(cat,"/etc系统配置包名交叉验证", etcScan, etcScan.startsWith("风险")||etcScan.startsWith("HMA")?2:0);
+
         Report rep = new Report();
         rep.results = results;
         rep.total = cn; rep.clean = clean; rep.found = found; rep.warn = warn; rep.low = low;
@@ -1697,6 +1706,80 @@ public class DetectionEngine {
         String ph = procHiddenApps();
         if (ph.contains("隐藏/残留")) { String[] p = ph.split(": "); if (p.length > 1) for (String s : p[1].split(" ")) all.add(s); }
         return all.isEmpty() ? "未发现隐藏应用" : "发现 " + all.size() + " 个疑似隐藏/残留应用: " + join(all);
+    }
+
+    /**
+     * /data/app/ 包名交叉验证：
+     * 1. 扫描 /data/app/ 下的目录名提取包名
+     * 2. 对比 PackageManager 已安装包名
+     * 3. /data/app有但PM无 = HMA隐藏应用
+     * 4. 包名命中风险列表 = 风险应用
+     */
+    private String dataAppPackageCrossCheck() {
+        try {
+            // 1. 获取 PackageManager 可见的所有包名
+            Set<String> pmPkgs = new HashSet<>();
+            try {
+                var pkgs = ctx.getPackageManager().getInstalledPackages(0);
+                for (var pi : pkgs) pmPkgs.add(pi.packageName);
+            } catch (Exception ignored) {}
+
+            // 2. 扫描 /data/app/ 目录
+            String ls = shExec("ls /data/app/ 2>/dev/null");
+            if (ls == null || ls.trim().isEmpty()) return "/data/app不可读(正常)";
+
+            Set<String> diskPkgs = new HashSet<>();
+            for (String entry : ls.split("\n")) {
+                entry = entry.trim();
+                if (entry.isEmpty()) continue;
+                // /data/app/ 下目录格式通常为：com.example.pkg-xxxxxxxx==/base.apk
+                // 提取 == 之前的部分作为包名
+                int idx = entry.indexOf("==");
+                if (idx > 0) entry = entry.substring(0, idx);
+                // 去掉数字后缀（如 -AbCd1234EfGh==）
+                int dashIdx = entry.lastIndexOf('-');
+                if (dashIdx > 0 && dashIdx > entry.indexOf('.')) {
+                    String suffix = entry.substring(dashIdx + 1);
+                    // 后缀看起来像随机串（大小写字母+数字混合，长度8-16）
+                    if (suffix.length() >= 8 && suffix.length() <= 16 && suffix.matches("[A-Za-z0-9_\\-]+")) {
+                        entry = entry.substring(0, dashIdx);
+                    }
+                }
+                if (entry.contains(".")) diskPkgs.add(entry);
+            }
+
+            if (diskPkgs.isEmpty()) return "未扫描到包名";
+
+            // 3. 对比：磁盘有但PM没有 = HMA隐藏
+            Set<String> hmaHidden = new HashSet<>();
+            Set<String> riskyPkgs = new HashSet<>();
+            for (String diskPkg : diskPkgs) {
+                boolean inPm = false;
+                for (String pmPkg : pmPkgs) {
+                    if (pmPkg.equals(diskPkg)) { inPm = true; break; }
+                }
+                if (!inPm) hmaHidden.add(diskPkg);
+                // 检查是否命中风险包列表
+                for (String hp : HIGH_PKGS) if (hp.equals(diskPkg)) { riskyPkgs.add(diskPkg); break; }
+                for (String wp : WEAK_PKGS) if (wp.equals(diskPkg)) { riskyPkgs.add(diskPkg); break; }
+            }
+
+            // 4. 生成结果
+            StringBuilder sb = new StringBuilder();
+            if (!riskyPkgs.isEmpty()) {
+                sb.append("风险应用: ").append(join(riskyPkgs));
+            }
+            if (!hmaHidden.isEmpty()) {
+                if (sb.length() > 0) sb.append("; ");
+                sb.append("HMA隐藏应用(文件存在但PM不可见): ").append(join(hmaHidden));
+            }
+            if (sb.length() == 0) {
+                return "一致(" + diskPkgs.size() + "个包名全部匹配)";
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "受限:" + e.getClass().getSimpleName();
+        }
     }
 
     private String join(Set<String> set) {
