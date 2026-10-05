@@ -1,9 +1,14 @@
 package com.zuomeng.app;
 
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.ProviderInfo;
+import android.content.pm.ServiceInfo;
+import android.content.pm.Signature;
 import android.media.MediaDrm;
 import android.os.Build;
 import android.provider.Settings;
@@ -22,6 +27,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.Key;
 import java.security.KeyStore;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -33,7 +39,7 @@ import java.util.regex.Pattern;
 import javax.crypto.KeyGenerator;
 
 /**
- * 做梦环境检测引擎 v1.2.0
+ * 做梦环境检测引擎 v1.2.17
  * 整合：zuomeng_check.sh 34 节 + 春秋检测(Chunqiu)全部检测项(含附录A/B/C) + DuckDetector 15 大检测域可行探针
  * 检测点总数约 250，全部在子线程执行；需要 root/native 的探针以"受限(LOW)"级别如实记录。
  */
@@ -44,10 +50,10 @@ public class DetectionEngine {
         void onProgress(DetectionResult result, int done, int total, String category, String title);
     }
 
-    /** 检测点总数：固定 312 项 = 离线 306（第一页）+ 联网 6（第二页），与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 329;
+    /** 检测点总数：离线检测点 + 联网检测点，与 run()/runOnline() 实际输出一致 */
+    public static final int TOTAL = 333;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 323;
+    public static final int TOTAL_OFFLINE = 327;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -612,8 +618,10 @@ public class DetectionEngine {
         r(cat,"系统服务列表→包名交叉比对", sh, sh.contains("隐藏/残留")?2:0);
         String ph = procHiddenApps();
         r(cat,"进程/命令行→包名交叉比对", ph, ph.contains("隐藏/残留")?2:0);
-        String pmd = pkgMatchDiff();
-        r(cat,"包管理器全量查询差异", pmd, pmd.contains("差异")?2:0);
+        // 新HMA三组数据源交叉比对（用户安装 / 路径扫描APK / 系统禁用冻结），替换旧#155计数对比与旧#318多通道包数对比
+        String hma = hmaThreeSourceCrossCheck();
+        int hmaLevel = hma.startsWith("【能力受限】") ? 0 : (hma.contains("HMA疑似隐藏应用") ? 2 : 0);
+        r(cat,"HMA三源交叉比对(用户安装/路径APK/禁用冻结)", hma, hmaLevel);
         String hid = hiddenAppSummary();
         r(cat,"隐藏应用综合判定", hid, hid.startsWith("发现")?2:0);
 
@@ -1211,12 +1219,8 @@ public class DetectionEngine {
         try { pkgCount = ctx.getPackageManager().getInstalledPackages(0).size(); } catch (Exception ignored) {}
         boolean pkgTooSmall = pkgCount > 0 && pkgCount < 20; // 正常手机至少几十上百个包
         r(cat,"包数量异常检测", "已安装包数="+pkgCount+(pkgTooSmall?" (过少!疑似HMA过滤)":""), pkgTooSmall?2:0);
-        // HMA 多通道包数对比：PackageManager vs service list 中的包名
-        String svcPkgCount = shExec("service list 2>/dev/null | grep -c '\\.'");
-        int svcCount = 0;
-        try { svcCount = Integer.parseInt(svcPkgCount != null ? svcPkgCount.trim() : "0"); } catch (Exception ignored) {}
-        int pkgDiff = svcCount - pkgCount;
-        r(cat,"HMA多通道包数对比", "PM包数="+pkgCount+" 服务列表包数="+svcCount+" 差值="+pkgDiff, pkgDiff > 10?2:0);
+        // 旧#318 HMA多通道包数对比（service list 总行数 vs PM 包数减法）已整体移除：
+        // service list 输出含大量 HAL/AIDL/Vendor 底层服务，并非 APK 应用包名，探针失效，由新 HMA 三源交叉比对替代
         // Native Root 弱信号汇总
         int weakSignals = 0;
         StringBuilder weakDetail = new StringBuilder();
@@ -1239,6 +1243,19 @@ public class DetectionEngine {
         String dataAppScan = dataAppPackageCrossCheck();
         r(cat,"/data/app包名交叉验证(HMA检测)", dataAppScan,
                 dataAppScan.startsWith("风险")?1:(dataAppScan.startsWith("HMA")?2:0));
+
+        // ===== v1.2.17 新增检测点（全部遵守降误报策略：单点仅日志，多点聚合才告警） =====
+        cat = "v1.2.17 新增";
+        String compHidden = componentHiddenProbe();
+        r(cat,"应用组件隐藏探测", compHidden, compHidden.startsWith("疑似隐藏组件")?2:0);
+        String sigMs = signatureMultiSource();
+        r(cat,"包签名多源一致性校验", sigMs, sigMs.startsWith("签名不一致")?2:0);
+        String suAgg = suFeatureAggregate();
+        r(cat,"su特征聚合汇总检测", suAgg, suAgg.startsWith("su特征聚合:多特征命中")?2:0);
+        String persistCol = persistPropCollection();
+        r(cat,"persist.*属性残留收集", persistCol, 0);
+        String zsTrace = zygiskShamikoTrace();
+        r(cat,"Zygisk/Shamiko间接痕迹聚合", zsTrace, zsTrace.startsWith("Zygisk/Shamiko痕迹聚合:多特征命中")?2:0);
 
         Report rep = new Report();
         rep.results = results;
@@ -1790,16 +1807,6 @@ public class DetectionEngine {
         return hidden.isEmpty() ? ("进程可见(" + all.size() + " 包名样 token)") : "隐藏/残留 " + hidden.size() + " 个: " + join(hidden);
     }
 
-    /** 通道6：包管理器 MATCH_UNINSTALLED 全量查询，对比被禁用/残留的包 */
-    private String pkgMatchDiff() {
-        try {
-            int base = ctx.getPackageManager().getInstalledPackages(0).size();
-            int full = ctx.getPackageManager().getInstalledPackages(
-                    PackageManager.MATCH_UNINSTALLED_PACKAGES | PackageManager.MATCH_DISABLED_COMPONENTS).size();
-            return "常规=" + base + " 全量=" + full + (full > base ? " · 差异 " + (full - base) + " 个(禁用/卸载残留)" : "");
-        } catch (Exception e) { return "受限:" + e.getClass().getSimpleName(); }
-    }
-
     /** 综合判定：汇总所有通道发现的隐藏/残留应用 */
     private String hiddenAppSummary() {
         Set<String> all = new HashSet<>();
@@ -1890,6 +1897,83 @@ public class DetectionEngine {
         }
     }
 
+    /**
+     * 新HMA三组数据源交叉比对（替代旧#155计数对比 与 旧#318 service list 包数对比）：
+     * ① 用户侧第三方已安装应用集合（PackageManager）
+     * ② 路径扫描 APK 安装目录提取包名集合（文件系统，必须捕获权限拒绝异常）
+     * ③ 系统禁用/冻结/停用应用集合（PackageManager + GET_DISABLED_COMPONENTS）
+     * 判定：三组集合两两差集逐条打印；差集包落在③禁用集内仅备注不告警；
+     * 仅当 ②有 且 ①无 且 ③无 三者同时满足才输出 SUSPECT(HMA疑似隐藏应用)。
+     */
+    private String hmaThreeSourceCrossCheck() {
+        Set<String> userPkgs = new HashSet<>();
+        Set<String> disabledPkgs = new HashSet<>();
+        // 数据源① + ③：一次遍历 PackageManager
+        try {
+            List<ApplicationInfo> apps = ctx.getPackageManager()
+                    .getInstalledApplications(PackageManager.GET_DISABLED_COMPONENTS);
+            for (ApplicationInfo ai : apps) {
+                if ((ai.flags & ApplicationInfo.FLAG_SYSTEM) == 0) userPkgs.add(ai.packageName);
+                boolean disabled = !ai.enabled
+                        || ai.enabledSetting == ApplicationInfo.ENABLED_STATE_DISABLED
+                        || ai.enabledSetting == ApplicationInfo.ENABLED_STATE_DISABLED_USER
+                        || ai.enabledSetting == ApplicationInfo.ENABLED_STATE_DISABLED_UNTIL_USED;
+                if (disabled) disabledPkgs.add(ai.packageName);
+            }
+        } catch (Exception e) {
+            return "受限(PackageManager 不可读):" + e.getClass().getSimpleName();
+        }
+
+        // 数据源②：路径扫描 APK 安装目录，从 APK 提取包名；捕获权限拒绝/读取失败异常
+        Set<String> diskPkgs = new HashSet<>();
+        String[] dirs = {"/data/app", "/system/app", "/system/priv-app", "/product/app",
+                "/product/priv-app", "/vendor/app"};
+        boolean dataAppUnreadable = false;
+        for (String d : dirs) {
+            File dir = new File(d);
+            if (!dir.isDirectory()) { if (d.equals("/data/app")) dataAppUnreadable = true; continue; }
+            File[] files = null;
+            try { files = dir.listFiles(); } catch (Exception ignored) { files = null; }
+            if (files == null) {
+                if (d.equals("/data/app")) dataAppUnreadable = true;
+                continue;
+            }
+            for (File apk : files) {
+                String pkg = apkPkgName(apk.getPath()); // APK 读取失败仅日志，不告警
+                if (pkg != null && pkg.indexOf('.') > 0) diskPkgs.add(pkg);
+            }
+        }
+        // SDK>=34：访问 APK 安装目录无权限 → 路径比对维度失效，禁止输出任何告警
+        if (dataAppUnreadable && Build.VERSION.SDK_INT >= 34) {
+            return "【能力受限】Android沙盒限制，当前应用无权限遍历安装目录，路径比对维度失效";
+        }
+
+        // 1. 三组集合两两差集，打印每一条差异具体包名（供人工复核）
+        StringBuilder diff = new StringBuilder();
+        Set<String> allDiff = new HashSet<>();
+        for (String p : diskPkgs)    if (!userPkgs.contains(p))     { allDiff.add(p); diff.append("②有①无:").append(p).append(' '); }
+        for (String p : disabledPkgs) if (!userPkgs.contains(p))    { allDiff.add(p); diff.append("③有①无:").append(p).append(' '); }
+        for (String p : diskPkgs)    if (!disabledPkgs.contains(p)) { allDiff.add(p); diff.append("②有③无:").append(p).append(' '); }
+
+        // 2/3. 判定：差集包在③禁用集内 → 备注不告警；②有①无③无三者同时命中 → SUSPECT
+        StringBuilder note = new StringBuilder();
+        StringBuilder sus = new StringBuilder();
+        for (String p : allDiff) {
+            if (disabledPkgs.contains(p)) {
+                note.append(p).append("(属系统禁用/冻结包,为系统原生行为,不一定为HMA隐藏) ");
+            }
+            if (diskPkgs.contains(p) && !userPkgs.contains(p) && !disabledPkgs.contains(p)) {
+                sus.append(p).append(' ');
+            }
+        }
+
+        StringBuilder out = new StringBuilder();
+        out.append("差集明细:").append(diff.length() > 0 ? diff.toString().trim() : "无差异");
+        if (note.length() > 0) out.append(" | 备注:").append(note.toString().trim());
+        if (sus.length() > 0) out.append(" | HMA疑似隐藏应用:").append(sus.toString().trim());
+        return out.toString();
+    }
+
     private String join(Set<String> set) {
         StringBuilder sb = new StringBuilder();
         for (String s : set) { sb.append(s).append(' '); if (sb.length() > 300) break; }
@@ -1907,6 +1991,23 @@ public class DetectionEngine {
         OEM_WHITELIST.add("com.oplus.synergy");
         OEM_WHITELIST.add("com.oplus.cosa");
         OEM_WHITELIST.add("com.oplus.obc");
+    }
+
+    /**
+     * 系统应用包名白名单（#257 修复）：支持通配前缀匹配。
+     * 命中白名单的包仅记录日志文本，绝对禁止输出 ABNORMAL 异常等级，不能被标记为风险应用。
+     * 前缀匹配：cn.nubia.* ；精确匹配：com.redteamobile.virtual.softsim
+     */
+    private static final String[] APP_PKG_WHITELIST_PREFIXES = { "cn.nubia." };
+    private static final Set<String> APP_PKG_WHITELIST_EXACT = new HashSet<>(java.util.Arrays.asList(
+            "com.redteamobile.virtual.softsim"
+    ));
+
+    /** 是否命中系统应用白名单（通配前缀 + 精确匹配） */
+    private boolean isAppPkgWhitelisted(String pkg) {
+        String n = pkg.toLowerCase();
+        for (String p : APP_PKG_WHITELIST_PREFIXES) if (n.startsWith(p)) return true;
+        return APP_PKG_WHITELIST_EXACT.contains(n);
     }
 
     /** OPPO/一加/realme 系机型（用于去除厂商原生误报） */
@@ -2144,6 +2245,7 @@ public class DetectionEngine {
     /** 用户应用包名 hook/作弊关键字 */
     private String userAppHookScan() {
         StringBuilder h = new StringBuilder();
+        StringBuilder wl = new StringBuilder();
         String[] keys = {"hook","xposed","frida","cheat","macro","lucky","deviceid","spoof","clone",
                 "virtual","hidemyapp","magisk","ksu","apatch","noactive","freezer","fakelocation","autoclick"};
         try {
@@ -2152,15 +2254,23 @@ public class DetectionEngine {
                 if ((ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0) continue;
                 if (OEM_WHITELIST.contains(ai.packageName)) continue;
                 String n = ai.packageName.toLowerCase();
-                for (String k : keys) if (n.contains(k)) { h.append(ai.packageName).append(' '); break; }
+                boolean hit = false;
+                for (String k : keys) if (n.contains(k)) { hit = true; break; }
+                if (!hit) continue;
+                // 命中系统应用白名单：仅记录日志，不标记为风险应用
+                if (isAppPkgWhitelisted(ai.packageName)) { wl.append(ai.packageName).append(' '); continue; }
+                h.append(ai.packageName).append(' ');
             }
         } catch (Exception ignored) {}
-        return h.length() > 0 ? h.toString().trim() : "未发现";
+        if (h.length() > 0) return h.toString().trim();
+        if (wl.length() > 0) return "未发现（白名单命中已忽略: " + wl.toString().trim() + "）";
+        return "未发现";
     }
 
     /** 系统应用包名 hook/作弊关键字（强关键字全量命中；弱关键字仅对非 OEM 应用生效，避免厂商组件误报） */
     private String systemAppHookScan() {
         StringBuilder h = new StringBuilder();
+        StringBuilder wl = new StringBuilder();
         String[] strong = {"magisk","supersu","superuser","ksu","apatch","xposed","lspd","lsposed","frida"};
         String[] weak = {"hook","fakelocation","deviceid","cloner","virtual","hide"};
         try {
@@ -2177,10 +2287,15 @@ public class DetectionEngine {
                 boolean hit = false;
                 for (String k : strong) if (n.contains(k)) { hit = true; break; }
                 if (!hit && !oem) for (String k : weak) if (n.contains(k)) { hit = true; break; }
-                if (hit) h.append(ai.packageName).append(' ');
+                if (!hit) continue;
+                // 命中系统应用白名单：绝对禁止输出 ABNORMAL，仅记录日志，不标记为风险应用
+                if (isAppPkgWhitelisted(ai.packageName)) { wl.append(ai.packageName).append(' '); continue; }
+                h.append(ai.packageName).append(' ');
             }
         } catch (Exception ignored) {}
-        return h.length() > 0 ? h.toString().trim() : "未发现";
+        if (h.length() > 0) return h.toString().trim();
+        if (wl.length() > 0) return "未发现（白名单命中已忽略: " + wl.toString().trim() + "）";
+        return "未发现";
     }
 
     /** APK 安装包分析：解析包名，/data/local/tmp 或命中黑名单即异常 */
@@ -2213,6 +2328,7 @@ public class DetectionEngine {
 
     private boolean riskPkg(String pkg) {
         if (OEM_WHITELIST.contains(pkg)) return false;
+        if (isAppPkgWhitelisted(pkg)) return false;
         for (String p : CHUNQIU_A) if (p.equals(pkg)) return true;
         String n = pkg.toLowerCase();
         return n.contains("hook")||n.contains("cheat")||n.contains("xposed")||n.contains("frida")
@@ -2302,5 +2418,260 @@ public class DetectionEngine {
             if (f.length >= 2) try { return (Long.parseLong(f[1]) / 1048576) + " GB"; } catch (Exception e) { return l.trim(); }
         }
         return "不可读";
+    }
+
+    // ============ v1.2.17 新增检测点（全部遵守降误报策略：单点仅日志，多点聚合才告警） ============
+
+    /** 组件隐藏探测阈值：至少命中多条组件且跨多个包才视为可疑（降低误报） */
+    private static final int COMPONENT_HIDDEN_MIN_HITS = 3;
+    private static final int COMPONENT_HIDDEN_MIN_PKGS = 2;
+
+    /**
+     * 1. 应用组件隐藏探测：
+     * 遍历已获取应用列表的 activity / receiver / service / content-provider 四大组件；
+     * 组件在 PackageManager 可查询到，但系统 resolve 解析失败 → 记录包名+组件名；
+     * 达到"多条组件命中 + 跨多个包"阈值才标记 SUSPECT，单条/少量仅记录日志。
+     * 跳过 disabled 组件，避免冻结组件造成误报。
+     */
+    private String componentHiddenProbe() {
+        StringBuilder hits = new StringBuilder();
+        Set<String> hitPkgs = new HashSet<>();
+        int hitCount = 0, totalComponents = 0;
+        try {
+            PackageManager pm = ctx.getPackageManager();
+            List<ApplicationInfo> apps = pm.getInstalledApplications(0);
+            for (ApplicationInfo ai : apps) {
+                String pkg = ai.packageName;
+                PackageInfo pi;
+                try {
+                    pi = pm.getPackageInfo(pkg, PackageManager.GET_ACTIVITIES
+                            | PackageManager.GET_RECEIVERS | PackageManager.GET_SERVICES
+                            | PackageManager.GET_PROVIDERS);
+                } catch (Exception ignored) { continue; }
+                if (pi.activities != null) for (ActivityInfo a : pi.activities) {
+                    if (a.enabled == false) continue;
+                    totalComponents++;
+                    try {
+                        Intent i = new Intent(); i.setClassName(pkg, a.name);
+                        if (pm.resolveActivity(i, 0) == null) { recordComponentHit(hits, hitPkgs, pkg, a.name); hitCount++; }
+                    } catch (Exception ignored) {}
+                }
+                if (pi.receivers != null) for (ActivityInfo a : pi.receivers) {
+                    if (a.enabled == false) continue;
+                    totalComponents++;
+                    try {
+                        Intent i = new Intent(); i.setClassName(pkg, a.name);
+                        if (pm.resolveActivity(i, 0) == null) { recordComponentHit(hits, hitPkgs, pkg, a.name); hitCount++; }
+                    } catch (Exception ignored) {}
+                }
+                if (pi.services != null) for (ServiceInfo s : pi.services) {
+                    if (s.enabled == false) continue;
+                    totalComponents++;
+                    try {
+                        Intent i = new Intent(); i.setClassName(pkg, s.name);
+                        if (pm.resolveService(i, 0) == null) { recordComponentHit(hits, hitPkgs, pkg, s.name); hitCount++; }
+                    } catch (Exception ignored) {}
+                }
+                if (pi.providers != null) for (ProviderInfo pr : pi.providers) {
+                    if (pr.enabled == false) continue;
+                    totalComponents++;
+                    boolean resolved = false;
+                    if (pr.authority != null && !pr.authority.trim().isEmpty()) {
+                        for (String auth : pr.authority.split(";")) {
+                            try { if (pm.resolveContentProvider(auth.trim(), 0) != null) { resolved = true; break; } }
+                            catch (Exception ignored) {}
+                        }
+                    }
+                    if (!resolved && pr.authority != null && !pr.authority.trim().isEmpty()) {
+                        recordComponentHit(hits, hitPkgs, pkg, pr.name); hitCount++;
+                    }
+                }
+            }
+        } catch (Exception e) { return "受限:" + e.getClass().getSimpleName(); }
+
+        if (totalComponents == 0) return "组件扫描受限(未扫描到组件)";
+        if (hitCount == 0) return "组件解析一致(" + totalComponents + " 个组件全部可解析)";
+        boolean suspicious = hitCount >= COMPONENT_HIDDEN_MIN_HITS && hitPkgs.size() >= COMPONENT_HIDDEN_MIN_PKGS;
+        String detail = hits.toString().trim();
+        if (suspicious) {
+            return "疑似隐藏组件 " + hitCount + "/" + totalComponents + " 个(" + hitPkgs.size() + "个包): " + detail;
+        }
+        return "组件解析差异 " + hitCount + " 个(" + hitPkgs.size() + "个包,低于阈值仅记录): " + detail;
+    }
+
+    /** 记录一条组件命中（包名/组件名） */
+    private void recordComponentHit(StringBuilder hits, Set<String> hitPkgs, String pkg, String comp) {
+        hits.append(pkg).append('/').append(comp).append(' ');
+        hitPkgs.add(pkg);
+    }
+
+    /**
+     * 2. 包签名多源一致性校验：
+     * 途径A：PackageManager API 获取应用签名；途径B：直接读取对应 APK 文件解析签名；
+     * 同一应用两份签名摘要不一致 → 标记 SUSPECT，输出包名与两份签名摘要；
+     * APK 读取失败仅日志，不告警。
+     */
+    private String signatureMultiSource() {
+        StringBuilder sus = new StringBuilder();
+        StringBuilder notes = new StringBuilder();
+        int checked = 0;
+        try {
+            PackageManager pm = ctx.getPackageManager();
+            List<ApplicationInfo> apps = pm.getInstalledApplications(0);
+            for (ApplicationInfo ai : apps) {
+                String pkg = ai.packageName;
+                String srcDir = ai.sourceDir;
+                if (srcDir == null || !new File(srcDir).exists()) continue;
+                String pmSig = null, fileSig = null;
+                try {
+                    PackageInfo pi = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES);
+                    if (pi.signatures != null && pi.signatures.length > 0) pmSig = sigDigest(pi.signatures[0]);
+                } catch (Exception ignored) {}
+                try {
+                    PackageInfo fpi = pm.getPackageArchiveInfo(srcDir, PackageManager.GET_SIGNATURES);
+                    if (fpi != null && fpi.signatures != null && fpi.signatures.length > 0) fileSig = sigDigest(fpi.signatures[0]);
+                } catch (Exception ignored) { notes.append(pkg).append("(APK签名读取失败) "); }
+                if (pmSig != null && fileSig != null) {
+                    checked++;
+                    if (!pmSig.equals(fileSig)) {
+                        sus.append(pkg).append("(PM:").append(pmSig).append(" APK:").append(fileSig).append(") ");
+                    }
+                }
+            }
+        } catch (Exception e) { return "受限:" + e.getClass().getSimpleName(); }
+        if (sus.length() > 0) return "签名不一致 " + sus.toString().trim() + (notes.length() > 0 ? " | " + notes.toString().trim() : "");
+        if (checked == 0) return "签名多源比对受限(无可比对样本)" + (notes.length() > 0 ? " | " + notes.toString().trim() : "");
+        return "签名多源一致(" + checked + " 个应用两份签名一致)" + (notes.length() > 0 ? " | " + notes.toString().trim() : "");
+    }
+
+    /** 签名证书 SHA-256 摘要（十六进制小写） */
+    private String sigDigest(Signature sig) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] d = md.digest(sig.toByteArray());
+            StringBuilder sb = new StringBuilder();
+            for (byte b : d) sb.append(String.format(Locale.US, "%02x", b));
+            return sb.toString();
+        } catch (Exception e) { return null; }
+    }
+
+    /**
+     * 3. su 特征聚合汇总检测：
+     * 聚合多项 su 相关探针结果：su 二进制文件存在、su 相关系统属性、su uid0 进程痕迹；
+     * 单一项特征命中：仅日志记录；至少 2 项及以上独立特征同时命中才输出 SUSPECT。
+     */
+    private String suFeatureAggregate() {
+        StringBuilder detail = new StringBuilder();
+        int hits = 0;
+        // 特征1：su 二进制文件存在
+        boolean bin = false;
+        for (String[] s : SU_PATHS) if (exists(s[0])) { bin = true; break; }
+        if (bin) { hits++; detail.append("su二进制存在 "); }
+        // 特征2：su 相关系统属性（弱特征）
+        boolean suProp = false;
+        String rootAccess = prop("persist.sys.root_access");
+        boolean paHit = rootAccess != null && !"0".equals(rootAccess);
+        boolean dbgProp = "1".equals(prop("ro.debuggable"));
+        boolean secureProp = "0".equals(prop("ro.secure"));
+        suProp = paHit || dbgProp || secureProp;
+        if (suProp) {
+            hits++; detail.append("su相关属性(");
+            if (paHit) detail.append("persist.sys.root_access=").append(rootAccess).append(' ');
+            if (dbgProp) detail.append("ro.debuggable=1 ");
+            if (secureProp) detail.append("ro.secure=0 ");
+            detail.append(") ");
+        }
+        // 特征3：su uid0 进程痕迹（root 用户下运行的 su 相关进程）
+        boolean uid0 = false;
+        String psOut = shExec("ps -A -o USER,NAME 2>/dev/null || ps -A 2>/dev/null");
+        if (psOut != null) {
+            String lower = psOut.toLowerCase();
+            for (String n : new String[]{"su", "daemonsu", "magiskd", "ksud", "apd", "supolicy"}) {
+                if (lower.contains("root") && lower.contains(n)) { uid0 = true; detail.append("root进程:").append(n).append(' '); break; }
+            }
+        }
+        if (uid0) hits++;
+
+        if (hits == 0) return "su特征聚合:无特征命中";
+        if (hits >= 2) return "su特征聚合:多特征命中(" + hits + "项): " + detail.toString().trim();
+        return "su特征聚合:单特征命中(仅记录): " + detail.toString().trim();
+    }
+
+    /**
+     * 4. persist.* 属性篡改残留收集：
+     * 遍历系统 persist.* 前缀属性，收集全部非出厂常见 persist 键值对，完整输出键、值；
+     * 没有确凿证据情况下不自动输出 SUSPECT，仅做日志收集供人工研判。
+     */
+    private String persistPropCollection() {
+        String out = shExec("getprop 2>/dev/null");
+        if (out == null || out.trim().isEmpty()) return "persist 属性不可读";
+        String[] common = {"persist.sys.language","persist.sys.country","persist.sys.locale","persist.sys.timezone",
+                "persist.sys.usb.config","persist.sys.dalvik.vm.lib.2","persist.sys.log.main","persist.sys.log.tag",
+                "persist.sys.boot.time","persist.sys.time_zone","persist.sys.miui","persist.sys.vivo",
+                "persist.radio","persist.vendor.radio","persist.sys.compatibility_mode","persist.sys.display_cabc",
+                "persist.sys.root_access","persist.sys.backgroundwindow","persist.sys.disable_rescue"};
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (String line : out.split("\n")) {
+            line = line.trim();
+            if (!line.startsWith("[persist.")) continue;
+            int end = line.indexOf(']');
+            if (end < 0) continue;
+            String key = line.substring(1, end);
+            boolean commonHit = false;
+            for (String c : common) if (key.startsWith(c)) { commonHit = true; break; }
+            if (commonHit) continue;
+            String val = end + 2 < line.length() ? line.substring(end + 2).trim() : "";
+            sb.append(key).append('=').append(val).append(' ');
+            n++;
+            if (n >= 40) break;
+        }
+        if (n == 0) return "persist 属性均属出厂常见值(无异常残留)";
+        return "persist 异常键值 " + n + " 项(仅收集供人工研判): " + sb.toString().trim();
+    }
+
+    /**
+     * 5. Zygisk / Shamiko 间接痕迹聚合检测：
+     * 读取 /proc 下各进程 mount 信息、进程环境变量，收集 Shamiko、Zygisk 相关间接痕迹；
+     * 单条痕迹仅记录日志；多条独立间接痕迹同时命中才输出 SUSPECT。
+     */
+    private String zygiskShamikoTrace() {
+        StringBuilder detail = new StringBuilder();
+        int hits = 0;
+        // 痕迹1：/proc/*/mountinfo 含 zygisk/shamiko 模块挂载
+        boolean mountHit = procScanContains("mountinfo", new String[]{"zygisk", "shamiko"});
+        if (mountHit) { hits++; detail.append("mountinfo模块挂载 "); }
+        // 痕迹2：/proc/*/maps 含 zygisk/shamiko 库
+        boolean mapsHit = procScanContains("maps", new String[]{"zygisk", "shamiko"});
+        if (mapsHit) { hits++; detail.append("maps库 "); }
+        // 痕迹3：/proc/*/environ 进程环境变量含 zygisk/shamiko
+        boolean envHit = procScanContains("environ", new String[]{"zygisk", "shamiko"});
+        if (envHit) { hits++; detail.append("environ环境变量 "); }
+        // 痕迹4：/data/adb/modules 下 zygisk/shamiko 模块目录
+        String mods = shExec("ls /data/adb/modules 2>/dev/null");
+        boolean modHit = mods != null && (mods.contains("zygisk") || mods.contains("shamiko"));
+        if (modHit) { hits++; detail.append("modules目录 "); }
+
+        if (hits == 0) return "Zygisk/Shamiko痕迹聚合:无间接痕迹";
+        if (hits >= 2) return "Zygisk/Shamiko痕迹聚合:多特征命中(" + hits + "项): " + detail.toString().trim();
+        return "Zygisk/Shamiko痕迹聚合:单特征命中(仅记录): " + detail.toString().trim();
+    }
+
+    /** 扫描 /proc 下各进程指定子文件是否含任一关键字（权限不足/读失败跳过，不告警） */
+    private boolean procScanContains(String subFile, String[] keywords) {
+        File proc = new File("/proc");
+        File[] pids = proc.listFiles();
+        if (pids == null) return false;
+        int scanned = 0;
+        for (File f : pids) {
+            if (!f.getName().matches("\\d+")) continue;
+            String content = read(f.getPath() + "/" + subFile);
+            if (content != null) {
+                String lower = content.toLowerCase();
+                for (String k : keywords) if (lower.contains(k)) return true;
+            }
+            if (++scanned > 300) break;
+        }
+        return false;
     }
 }

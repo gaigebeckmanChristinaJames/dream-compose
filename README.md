@@ -1,6 +1,6 @@
 # 做梦 · 环境检测 (dream-compose)
 
-一款基于 Jetpack Compose + Material 3 的 Android 设备环境检测工具，覆盖 **294 项**离线/在线检测点，帮助判断设备是否存在 Root、Hook、模拟器、多开、隐藏应用等异常环境。
+一款基于 Jetpack Compose + Material 3 的 Android 设备环境检测工具，覆盖 **333 项**离线/在线检测点，帮助判断设备是否存在 Root、Hook、模拟器、多开、隐藏应用等异常环境。
 
 ## 功能特性
 
@@ -12,7 +12,7 @@
 - **属性检测**：pihooks、pixelprops、spoof 等改机/伪装属性
 - **异常进程**：可疑守护进程、Frida/GDB、Shizuku、HMA 隐藏进程
 - **应用检测**：高危包、工具包、虚拟化/双开、风险目录扫描
-- **隐藏应用(HMA)**：电池白名单/无障碍/默认应用/系统服务/进程命令行五通道交叉比对
+- **隐藏应用(HMA)**：电池白名单/无障碍/默认应用/系统服务/进程命令行多通道交叉比对 + 用户安装/路径APK/禁用冻结三源交叉比对
 - **SELinux**：enforce 状态、策略版本、本进程 context、access 节点可读性
 - **挂载**：可疑挂载源、overlay 覆盖、挂载间隙、bind/overlay 统计
 - **反调试/内存**：TracerPid、NSpid、可疑端口、rwxp 段、maps 注入特征
@@ -49,6 +49,20 @@ gradle assembleRelease
 ```
 
 ## 误报修复记录
+
+### v1.2.17
+**修复项**
+- 修复 #257：厂商原厂系统应用被 hook/作弊关键字误判为 ABNORMAL 风险应用；新增包名白名单（通配前缀 `cn.nubia.*`、精确 `com.redteamobile.virtual.softsim`），命中白名单仅记录日志，不再输出 ABNORMAL
+- 废弃旧 #155：移除仅靠 PackageManager 两种查询模式数量差值直接判定 SUSPECT 的逻辑（厂商系统自带禁用包会造成误触发），由新 HMA 三源交叉检测替代
+- 彻底删除旧 #318：移除 `service list` 总行数与包总数相减的 HMA 多通道包数对比探针（service list 含大量 HAL/AIDL/Vendor 底层服务，非 APK 包名，探针失效），不再注册/不再出现在报告
+
+**新增检测项**
+- HMA 三组数据源交叉比对：用户安装 / 路径扫描APK / 系统禁用冻结集合差集运算；差集在禁用集内仅备注不告警；仅当「路径有 + 用户无 + 禁用无」三者同时满足才输出 SUSPECT；SDK≥34 无权限遍历安装目录时输出能力受限文本，禁止告警
+- 应用组件隐藏探测：activity/receiver/service/content-provider 在 PM 可查但 resolve 解析失败，多条跨包命中才 SUSPECT
+- 包签名多源一致性校验：PM 签名 vs APK 文件签名摘要不一致才 SUSPECT，APK 读取失败仅日志
+- su 特征聚合汇总：su 二进制 + su 属性 + su uid0 进程，≥2 项独立特征同时命中才 SUSPECT
+- persist.\* 属性篡改残留收集：收集非出厂常见 persist 键值对，仅日志供人工研判，不自动告警
+- Zygisk/Shamiko 间接痕迹聚合：mountinfo/maps/environ/modules 多痕迹，≥2 项才 SUSPECT
 
 ### v1.2.11
 - 修复 Android 16 AppZygote 导致的 zygote 进程链误报
