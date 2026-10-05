@@ -1010,8 +1010,8 @@ public class DetectionEngine {
         }
         r(cat,"自定义内核特征", kernelSusp.length()>0?kernelSusp.toString().trim():"官方内核", kernelSusp.length()>0?2:0);
         // kptr_restrict
-        String kptr = read("/proc/sys/kernel/kptr_restrict");
-        r(cat,"kptr_restrict", kptr==null?"不可读":kptr.trim(), kptr!=null&&"0".equals(kptr.trim())?2:0);
+        String kptrVal = read("/proc/sys/kernel/kptr_restrict");
+        r(cat,"kptr_restrict", kptrVal==null?"不可读":kptrVal.trim(), kptrVal!=null&&"0".equals(kptrVal.trim())?2:0);
         // 内核版本多源一致性
         String unameR = shExec("uname -r 2>/dev/null");
         String sysOsrel = read("/proc/sys/kernel/osrelease");
@@ -1128,9 +1128,6 @@ public class DetectionEngine {
         String dataAppScan = dataAppPackageCrossCheck();
         r(cat,"/data/app包名交叉验证(HMA检测)", dataAppScan,
                 dataAppScan.startsWith("风险")?1:(dataAppScan.startsWith("HMA")?2:0));
-        // /etc/ 路径包名交叉验证：系统配置中声明的包名 vs 已安装包名
-        String etcScan = etcPackageCrossCheck();
-        r(cat,"/etc系统配置包名交叉验证", etcScan, etcScan.startsWith("风险")||etcScan.startsWith("HMA")?2:0);
 
         Report rep = new Report();
         rep.results = results;
