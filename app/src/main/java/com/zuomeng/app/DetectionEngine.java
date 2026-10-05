@@ -39,7 +39,7 @@ import java.util.regex.Pattern;
 import javax.crypto.KeyGenerator;
 
 /**
- * 做梦环境检测引擎 v1.2.17
+ * 做梦环境检测引擎 v1.2.18
  * 整合：zuomeng_check.sh 34 节 + 春秋检测(Chunqiu)全部检测项(含附录A/B/C) + DuckDetector 15 大检测域可行探针
  * 检测点总数约 250，全部在子线程执行；需要 root/native 的探针以"受限(LOW)"级别如实记录。
  */
@@ -51,9 +51,9 @@ public class DetectionEngine {
     }
 
     /** 检测点总数：离线检测点 + 联网检测点，与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 333;
+    public static final int TOTAL = 330;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 327;
+    public static final int TOTAL_OFFLINE = 324;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -1084,11 +1084,16 @@ public class DetectionEngine {
         String svcList = shExec("service list 2>/dev/null | grep -i adb");
         // 通道6：USB 状态
         String usbState = shExec("cat /sys/class/android_usb/android0/state 2>/dev/null || cat /sys/class/udc/*/state 2>/dev/null");
-        // 综合判定：多个通道交叉验证
-        boolean adbOnByGlobal = "1".equals(adbGlobal);
-        boolean adbOnBySvc = "running".equals(adbdSvc);
-        boolean adbSusp = (adbOnByGlobal || adbOnBySvc) && !"0".equals(adbSecure);
-        r(cat,"ADB多通道状态", "settings="+adbGlobal+" adbd_service="+adbdSvc+" socket="+(adbdSocket?"存在":"无")+" secure="+adbSecure, adbSusp?2:0);
+        // 综合判定（降低误报）：init.svc.adbd=running 是每台设备常驻的系统服务，不代表 ADB 已开启，不作为判定依据。
+        // 仅当「用户实际开启USB调试(adb_enabled=1)」与「ADB无需授权(ro.adb.secure=0)」两条独立证据同时命中才 SUSPECT；
+        // 仅开启调试但保持授权保护(secure=1)时降为 LOW 记录，不输出 SUSPECT。
+        boolean adbUserEnabled = "1".equals(adbGlobal);
+        boolean adbInsecure = "0".equals(adbSecure);
+        int adbLevel;
+        if (adbUserEnabled && adbInsecure) adbLevel = 2;          // ADB 已开启且无授权保护（真正可疑）
+        else if (adbUserEnabled && !adbInsecure) adbLevel = 3;    // 已开启调试但带授权保护（低风险记录）
+        else adbLevel = 0;                                        // 未开启调试 / adbd 常驻服务为正常
+        r(cat,"ADB多通道状态", "settings="+adbGlobal+" adbd_service="+adbdSvc+" socket="+(adbdSocket?"存在":"无")+" secure="+adbSecure+(adbLevel==0?"(adbd常驻服务,非ADB开启标志)":""), adbLevel);
         r(cat,"adbd socket节点", adbdSocket?"/dev/socket/adbd存在":"无adbd socket", 0);
         r(cat,"ADB USB状态", usbState==null||usbState.trim().isEmpty()?"不可读":usbState.trim(), 0);
         // adb_keys 授权文件深度扫描
@@ -1247,7 +1252,7 @@ public class DetectionEngine {
         // ===== v1.2.17 新增检测点（全部遵守降误报策略：单点仅日志，多点聚合才告警） =====
         cat = "v1.2.17 新增";
         String compHidden = componentHiddenProbe();
-        r(cat,"应用组件隐藏探测", compHidden, compHidden.startsWith("疑似隐藏组件")?2:0);
+        r(cat,"应用组件隐藏探测", compHidden, compHidden.startsWith("风险应用组件异常")?2:0);
         String sigMs = signatureMultiSource();
         r(cat,"包签名多源一致性校验", sigMs, sigMs.startsWith("签名不一致")?2:0);
         String suAgg = suFeatureAggregate();
@@ -2428,59 +2433,56 @@ public class DetectionEngine {
 
     // ============ v1.2.17 新增检测点（全部遵守降误报策略：单点仅日志，多点聚合才告警） ============
 
-    /** 组件隐藏探测阈值：至少命中多条组件且跨多个包才视为可疑（降低误报） */
-    private static final int COMPONENT_HIDDEN_MIN_HITS = 3;
-    private static final int COMPONENT_HIDDEN_MIN_PKGS = 2;
-
     /**
      * 1. 应用组件隐藏探测：
-     * 遍历已获取应用列表的 activity / receiver / service / content-provider 四大组件；
-     * 组件在 PackageManager 可查询到，但系统 resolve 解析失败 → 记录包名+组件名；
-     * 达到"多条组件命中 + 跨多个包"阈值才标记 SUSPECT，单条/少量仅记录日志。
-     * 跳过 disabled 组件，避免冻结组件造成误报。
+     * 只针对已知风险应用列表（高危/工具包/虚拟化/春秋黑名单）做组件隐藏交叉判定；
+     * 系统应用与普通第三方应用（含厂商工具、普通 App 组件）一律不参与，避免误报。
+     * 日志只列异常风险包名（短日志）：风险包已安装、但其 exported+enabled 关键组件几乎全部 resolve 失败，
+     * 视为被隐藏。仅输出命中的风险包名。
      */
     private String componentHiddenProbe() {
-        StringBuilder hits = new StringBuilder();
-        Set<String> hitPkgs = new HashSet<>();
-        int hitCount = 0, totalComponents = 0;
+        Set<String> riskPkgs = new HashSet<>();
+        for (String p : HIGH_PKGS) riskPkgs.add(p);
+        for (String p : WEAK_PKGS) riskPkgs.add(p);
+        for (String p : CHUNQIU_A) riskPkgs.add(p);
+        for (String p : VIRT_PKGS) riskPkgs.add(p);
+
+        PackageManager pm = ctx.getPackageManager();
+        StringBuilder susp = new StringBuilder();
+        int checked = 0;
         try {
-            PackageManager pm = ctx.getPackageManager();
-            List<ApplicationInfo> apps = pm.getInstalledApplications(0);
-            for (ApplicationInfo ai : apps) {
-                String pkg = ai.packageName;
+            for (String pkg : riskPkgs) {
                 PackageInfo pi;
                 try {
                     pi = pm.getPackageInfo(pkg, PackageManager.GET_ACTIVITIES
                             | PackageManager.GET_RECEIVERS | PackageManager.GET_SERVICES
                             | PackageManager.GET_PROVIDERS);
+                } catch (PackageManager.NameNotFoundException notInstalled) {
+                    continue; // 风险包未安装：正常，不报
                 } catch (Exception ignored) { continue; }
+                checked++;
+                int total = 0, fail = 0;
                 if (pi.activities != null) for (ActivityInfo a : pi.activities) {
-                    if (a.enabled == false) continue;
-                    totalComponents++;
-                    try {
-                        Intent i = new Intent(); i.setClassName(pkg, a.name);
-                        if (pm.resolveActivity(i, 0) == null) { recordComponentHit(hits, hitPkgs, pkg, a.name); hitCount++; }
-                    } catch (Exception ignored) {}
+                    if (!(a.enabled && a.exported)) continue;
+                    total++;
+                    try { Intent i = new Intent(); i.setClassName(pkg, a.name); if (pm.resolveActivity(i, 0) == null) fail++; }
+                    catch (Exception ignored) {}
                 }
                 if (pi.receivers != null) for (ActivityInfo a : pi.receivers) {
-                    if (a.enabled == false) continue;
-                    totalComponents++;
-                    try {
-                        Intent i = new Intent(); i.setClassName(pkg, a.name);
-                        if (pm.resolveActivity(i, 0) == null) { recordComponentHit(hits, hitPkgs, pkg, a.name); hitCount++; }
-                    } catch (Exception ignored) {}
+                    if (!(a.enabled && a.exported)) continue;
+                    total++;
+                    try { Intent i = new Intent(); i.setClassName(pkg, a.name); if (pm.resolveActivity(i, 0) == null) fail++; }
+                    catch (Exception ignored) {}
                 }
                 if (pi.services != null) for (ServiceInfo s : pi.services) {
-                    if (s.enabled == false) continue;
-                    totalComponents++;
-                    try {
-                        Intent i = new Intent(); i.setClassName(pkg, s.name);
-                        if (pm.resolveService(i, 0) == null) { recordComponentHit(hits, hitPkgs, pkg, s.name); hitCount++; }
-                    } catch (Exception ignored) {}
+                    if (!(s.enabled && s.exported)) continue;
+                    total++;
+                    try { Intent i = new Intent(); i.setClassName(pkg, s.name); if (pm.resolveService(i, 0) == null) fail++; }
+                    catch (Exception ignored) {}
                 }
                 if (pi.providers != null) for (ProviderInfo pr : pi.providers) {
-                    if (pr.enabled == false) continue;
-                    totalComponents++;
+                    if (!(pr.enabled && pr.exported)) continue;
+                    total++;
                     boolean resolved = false;
                     if (pr.authority != null && !pr.authority.trim().isEmpty()) {
                         for (String auth : pr.authority.split(";")) {
@@ -2488,27 +2490,15 @@ public class DetectionEngine {
                             catch (Exception ignored) {}
                         }
                     }
-                    if (!resolved && pr.authority != null && !pr.authority.trim().isEmpty()) {
-                        recordComponentHit(hits, hitPkgs, pkg, pr.name); hitCount++;
-                    }
+                    if (!resolved) fail++;
                 }
+                // 风险包已安装且关键组件几乎全部解析失败 = 疑似被 HMA 隐藏
+                if (total > 0 && fail == total) susp.append(pkg).append(' ');
             }
         } catch (Exception e) { return "受限:" + e.getClass().getSimpleName(); }
 
-        if (totalComponents == 0) return "组件扫描受限(未扫描到组件)";
-        if (hitCount == 0) return "组件解析一致(" + totalComponents + " 个组件全部可解析)";
-        boolean suspicious = hitCount >= COMPONENT_HIDDEN_MIN_HITS && hitPkgs.size() >= COMPONENT_HIDDEN_MIN_PKGS;
-        String detail = hits.toString().trim();
-        if (suspicious) {
-            return "疑似隐藏组件 " + hitCount + "/" + totalComponents + " 个(" + hitPkgs.size() + "个包): " + detail;
-        }
-        return "组件解析差异 " + hitCount + " 个(" + hitPkgs.size() + "个包,低于阈值仅记录): " + detail;
-    }
-
-    /** 记录一条组件命中（包名/组件名） */
-    private void recordComponentHit(StringBuilder hits, Set<String> hitPkgs, String pkg, String comp) {
-        hits.append(pkg).append('/').append(comp).append(' ');
-        hitPkgs.add(pkg);
+        if (susp.length() == 0) return "未发现风险应用组件隐藏(已核对 " + checked + " 个已知风险包)";
+        return "风险应用组件异常(疑似被隐藏): " + susp.toString().trim();
     }
 
     /**
