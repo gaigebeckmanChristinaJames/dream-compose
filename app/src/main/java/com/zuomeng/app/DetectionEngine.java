@@ -45,9 +45,9 @@ public class DetectionEngine {
     }
 
     /** 检测点总数：固定 312 项 = 离线 306（第一页）+ 联网 6（第二页），与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 324;
+    public static final int TOTAL = 329;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 318;
+    public static final int TOTAL_OFFLINE = 323;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -1188,6 +1188,51 @@ public class DetectionEngine {
                 || "userdebug".equals(prop("ro.build.type"))
                 || "eng".equals(prop("ro.build.type"));
         r(cat,"调试模式综合状态", "ro.debuggable="+prop("ro.debuggable")+" type="+prop("ro.build.type"), debugOn?1:0);
+
+        // ===== Duck-Detector风格高级检测 =====
+        cat = "高级交叉验证";
+        // Bootloader/Verified Boot 一致性交叉验证
+        String vbState = prop("ro.boot.verifiedbootstate");
+        String flashLock = prop("ro.boot.flash.locked");
+        String vbmetaDigest = prop("ro.boot.vbmeta.digest");
+        boolean blMismatch = false;
+        String blDetail = "vb_state="+vbState+" flash_locked="+flashLock+" digest="+(vbmetaDigest==null?"空":vbmetaDigest.substring(0,Math.min(16,vbmetaDigest.length()))+"...");
+        // green状态但flash未锁 = 矛盾
+        if ("green".equals(vbState) && !"1".equals(flashLock)) blMismatch = true;
+        // unlocked状态但vbmeta.digest存在 = 矛盾
+        if ("orange".equals(vbState) && vbmetaDigest != null && !vbmetaDigest.replace("0","").isEmpty()) blMismatch = true;
+        r(cat,"Bootloader完整性交叉验证", blDetail, blMismatch?1:0);
+        // TEE Attestation 一致性：verifiedBootHash存在但vbmeta.digest为空 = 矛盾
+        String vbHash = prop("ro.boot.vbmeta.device_state");
+        boolean attestMismatch = vbmetaDigest == null || vbmetaDigest.replace("0","").isEmpty();
+        r(cat,"TEE Attestation一致性", "vbmeta_digest="+(attestMismatch?"空(异常)":"存在"), attestMismatch?1:0);
+        // Package Inventory 数量异常检测
+        int pkgCount = 0;
+        try { pkgCount = ctx.getPackageManager().getInstalledPackages(0).size(); } catch (Exception ignored) {}
+        boolean pkgTooSmall = pkgCount > 0 && pkgCount < 20; // 正常手机至少几十上百个包
+        r(cat,"包数量异常检测", "已安装包数="+pkgCount+(pkgTooSmall?" (过少!疑似HMA过滤)":""), pkgTooSmall?2:0);
+        // HMA 多通道包数对比：PackageManager vs service list 中的包名
+        String svcPkgCount = shExec("service list 2>/dev/null | grep -c '\\.'");
+        int svcCount = 0;
+        try { svcCount = Integer.parseInt(svcPkgCount != null ? svcPkgCount.trim() : "0"); } catch (Exception ignored) {}
+        int pkgDiff = svcCount - pkgCount;
+        r(cat,"HMA多通道包数对比", "PM包数="+pkgCount+" 服务列表包数="+svcCount+" 差值="+pkgDiff, pkgDiff > 10?2:0);
+        // Native Root 弱信号汇总
+        int weakSignals = 0;
+        StringBuilder weakDetail = new StringBuilder();
+        // 挂载漂移
+        String mounts = read("/proc/self/mounts");
+        if (mounts != null && mounts.contains("magisk")) { weakSignals++; weakDetail.append("mount含magisk "); }
+        // cgroup 异常
+        String cgroup = read("/proc/self/cgroup");
+        if (cgroup != null && cgroup.contains("magisk")) { weakSignals++; weakDetail.append("cgroup含magisk "); }
+        // 属性残留
+        String allProps = shExec("getprop 2>/dev/null | grep -i magisk");
+        if (allProps != null && !allProps.trim().isEmpty()) { weakSignals++; weakDetail.append("属性残留 "); }
+        // /proc/self/maps 残留
+        String mapsSelf = read("/proc/self/maps");
+        if (mapsSelf != null && mapsSelf.contains("magisk")) { weakSignals++; weakDetail.append("maps含magisk "); }
+        r(cat,"Native Root弱信号汇总", weakSignals>0?weakDetail.toString().trim()+" ("+weakSignals+"个弱信号)":"无弱信号", weakSignals>=2?2:0);
 
         // /data/app/ 包名交叉验证：文件系统存在 vs PackageManager可见
         // HMA隐藏应用后PackageManager查不到，但APK文件仍在/data/app/下
