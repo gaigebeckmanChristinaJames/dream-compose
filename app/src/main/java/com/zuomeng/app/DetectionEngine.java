@@ -1149,12 +1149,12 @@ public class DetectionEngine {
         } catch (Exception ignored) {}
         r(cat,"已安装应用统计", "总="+totalPkgs+" 第三方="+thirdPkgs, 0);
         // 内核编译器信息
-        String procVer = read("/proc/version");
+        String procVersion = read("/proc/version");
         String compiler = "不可读";
-        if (procVer != null) {
-            if (procVer.contains("clang")) compiler = "clang编译";
-            else if (procVer.contains("gcc")) compiler = "gcc编译";
-            else compiler = procVer.length()>60?procVer.substring(0,60):procVer;
+        if (procVersion != null) {
+            if (procVersion.contains("clang")) compiler = "clang编译";
+            else if (procVersion.contains("gcc")) compiler = "gcc编译";
+            else compiler = procVersion.length()>60?procVersion.substring(0,60):procVersion;
         }
         r(cat,"内核编译器", compiler, 0);
         // 开发者选项中的ADB授权计数
@@ -1192,15 +1192,15 @@ public class DetectionEngine {
         // ===== Duck-Detector风格高级检测 =====
         cat = "高级交叉验证";
         // Bootloader/Verified Boot 一致性交叉验证
-        String vbState = prop("ro.boot.verifiedbootstate");
+        String verifiedBootState = prop("ro.boot.verifiedbootstate");
         String flashLock = prop("ro.boot.flash.locked");
         String vbmetaDigest = prop("ro.boot.vbmeta.digest");
         boolean blMismatch = false;
-        String blDetail = "vb_state="+vbState+" flash_locked="+flashLock+" digest="+(vbmetaDigest==null?"空":vbmetaDigest.substring(0,Math.min(16,vbmetaDigest.length()))+"...");
+        String blDetail = "vb_state="+verifiedBootState+" flash_locked="+flashLock+" digest="+(vbmetaDigest==null?"空":vbmetaDigest.substring(0,Math.min(16,vbmetaDigest.length()))+"...");
         // green状态但flash未锁 = 矛盾
-        if ("green".equals(vbState) && !"1".equals(flashLock)) blMismatch = true;
+        if ("green".equals(verifiedBootState) && !"1".equals(flashLock)) blMismatch = true;
         // unlocked状态但vbmeta.digest存在 = 矛盾
-        if ("orange".equals(vbState) && vbmetaDigest != null && !vbmetaDigest.replace("0","").isEmpty()) blMismatch = true;
+        if ("orange".equals(verifiedBootState) && vbmetaDigest != null && !vbmetaDigest.replace("0","").isEmpty()) blMismatch = true;
         r(cat,"Bootloader完整性交叉验证", blDetail, blMismatch?1:0);
         // TEE Attestation 一致性：verifiedBootHash存在但vbmeta.digest为空 = 矛盾
         String vbHash = prop("ro.boot.vbmeta.device_state");
@@ -1221,17 +1221,17 @@ public class DetectionEngine {
         int weakSignals = 0;
         StringBuilder weakDetail = new StringBuilder();
         // 挂载漂移
-        String mounts = read("/proc/self/mounts");
-        if (mounts != null && mounts.contains("magisk")) { weakSignals++; weakDetail.append("mount含magisk "); }
+        String mountList = read("/proc/self/mounts");
+        if (mountList != null && mountList.contains("magisk")) { weakSignals++; weakDetail.append("mount含magisk "); }
         // cgroup 异常
-        String cgroup = read("/proc/self/cgroup");
-        if (cgroup != null && cgroup.contains("magisk")) { weakSignals++; weakDetail.append("cgroup含magisk "); }
+        String cgroupContent = read("/proc/self/cgroup");
+        if (cgroupContent != null && cgroupContent.contains("magisk")) { weakSignals++; weakDetail.append("cgroup含magisk "); }
         // 属性残留
         String allProps = shExec("getprop 2>/dev/null | grep -i magisk");
         if (allProps != null && !allProps.trim().isEmpty()) { weakSignals++; weakDetail.append("属性残留 "); }
         // /proc/self/maps 残留
-        String mapsSelf = read("/proc/self/maps");
-        if (mapsSelf != null && mapsSelf.contains("magisk")) { weakSignals++; weakDetail.append("maps含magisk "); }
+        String mapsContent = read("/proc/self/maps");
+        if (mapsContent != null && mapsContent.contains("magisk")) { weakSignals++; weakDetail.append("maps含magisk "); }
         r(cat,"Native Root弱信号汇总", weakSignals>0?weakDetail.toString().trim()+" ("+weakSignals+"个弱信号)":"无弱信号", weakSignals>=2?2:0);
 
         // /data/app/ 包名交叉验证：文件系统存在 vs PackageManager可见
