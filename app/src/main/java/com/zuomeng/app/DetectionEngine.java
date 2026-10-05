@@ -45,9 +45,9 @@ public class DetectionEngine {
     }
 
     /** 检测点总数：固定 312 项 = 离线 306（第一页）+ 联网 6（第二页），与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 313;
+    public static final int TOTAL = 318;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 307;
+    public static final int TOTAL_OFFLINE = 312;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -1109,7 +1109,7 @@ public class DetectionEngine {
                 } catch (Exception ignored) {}
             }
         }
-        r(cat,"敏感路径可读性", pathHit.length()>0?pathHit.toString().trim():"全部不可读(正常)", pathHit.length()>0?2:0);
+        r(cat,"敏感路径可读性(仅记录)", pathHit.length()>0?pathHit.toString().trim():"全部不可读(正常)", 0);
         // /proc/1/root 越权探测
         String proc1Root = shExec("ls /proc/1/root/system/bin/ 2>/dev/null | head -5");
         r(cat,"/proc/1/root越权探测", proc1Root==null||proc1Root.trim().isEmpty()?"拒绝访问(正常)":"可读! "+proc1Root.replace('\n',' ').trim(), (proc1Root!=null&&!proc1Root.trim().isEmpty())?1:0);
@@ -1122,6 +1122,44 @@ public class DetectionEngine {
         // 公开路径异常二进制
         String publicBin = shExec("find /sdcard/Download /sdcard/Documents -maxdepth 2 -type f \\( -name '*.sh' -o -name '*.su' -o -name '*.magisk' -o -name '*.patch' \\) 2>/dev/null | head -5");
         r(cat,"公开路径异常脚本", publicBin==null||publicBin.trim().isEmpty()?"未见":publicBin.replace('\n',' ').trim(), publicBin!=null&&!publicBin.trim().isEmpty()?2:0);
+
+        // ===== 39. 新增检测点 =====
+        cat = "补充检测";
+        // build.prop 指纹一致性
+        String bpFp = prop("ro.build.fingerprint");
+        String bpBuild = read("/system/build.prop");
+        String bpMatch = "不可读";
+        if (bpBuild != null && bpFp != null) {
+            bpMatch = bpBuild.contains(bpFp) ? "build.prop指纹一致" : "不一致! fingerprint="+bpFp;
+        }
+        r(cat,"build.prop指纹一致性", bpMatch, bpMatch.startsWith("不一致")?2:0);
+        // 设备管理员应用
+        int deviceAdmins = 0;
+        try {
+            var admins = ctx.getSystemService(android.app.admin.DevicePolicyManager.class).getActiveAdmins();
+            if (admins != null) deviceAdmins = admins.size();
+        } catch (Exception ignored) {}
+        r(cat,"设备管理员应用数量", deviceAdmins==0?"无":deviceAdmins+"个", deviceAdmins>3?2:0);
+        // 已安装应用总数
+        int totalPkgs = 0, thirdPkgs = 0;
+        try {
+            var apps = ctx.getPackageManager().getInstalledApplications(0);
+            totalPkgs = apps.size();
+            for (var ai : apps) if ((ai.flags & android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0) thirdPkgs++;
+        } catch (Exception ignored) {}
+        r(cat,"已安装应用统计", "总="+totalPkgs+" 第三方="+thirdPkgs, 0);
+        // 内核编译器信息
+        String procVer = read("/proc/version");
+        String compiler = "不可读";
+        if (procVer != null) {
+            if (procVer.contains("clang")) compiler = "clang编译";
+            else if (procVer.contains("gcc")) compiler = "gcc编译";
+            else compiler = procVer.length()>60?procVer.substring(0,60):procVer;
+        }
+        r(cat,"内核编译器", compiler, 0);
+        // 开发者选项中的ADB授权计数
+        String adbKeysCount = shExec("ls /data/misc/adb/ 2>/dev/null | wc -l");
+        r(cat,"ADB授权密钥数量", adbKeysCount==null?"不可读":adbKeysCount.trim()+"个", 0);
 
         // /data/app/ 包名交叉验证：文件系统存在 vs PackageManager可见
         // HMA隐藏应用后PackageManager查不到，但APK文件仍在/data/app/下
