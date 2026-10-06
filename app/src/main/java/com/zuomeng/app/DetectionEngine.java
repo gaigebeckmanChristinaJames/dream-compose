@@ -39,7 +39,7 @@ import java.util.regex.Pattern;
 import javax.crypto.KeyGenerator;
 
 /**
- * 做梦环境检测引擎 v1.2.20
+ * 做梦环境检测引擎 v1.2.21
  * 整合：zuomeng_check.sh 34 节 + 春秋检测(Chunqiu)全部检测项(含附录A/B/C) + DuckDetector 15 大检测域可行探针
  * 检测点总数约 250，全部在子线程执行；需要 root/native 的探针以"受限(LOW)"级别如实记录。
  */
@@ -1800,9 +1800,28 @@ public class DetectionEngine {
             "android.hardware.", "vendor."
     ));
 
+    /** 已知良性应用白名单（输入法等常用 App）：即使 PackageManager 因包可见性查不到，也不算 HMA 隐藏 */
+    private static final Set<String> HMA_BENIGN = new HashSet<>(java.util.Arrays.asList(
+            "com.tencent.wetype",                 // 微信输入法
+            "com.baidu.input", "com.baidu.inputmethod", "com.baidu.ime",  // 百度输入法
+            "com.sohu.inputmethod.sogou",        // 搜狗输入法
+            "com.iflytek.inputmethod",           // 讯飞输入法
+            "com.google.android.inputmethod.latin", // Gboard
+            "com.tencent.qqpinyin"               // QQ输入法
+    ));
+
     private boolean pkgKnown(String pkg) {
-        // 高通/联发科/系统服务白名单：这些组件通常不作为独立 APK 安装，不算隐藏
         String n = pkg.toLowerCase();
+        // 良性 App 白名单（输入法等）：包可见性限制下查不到也不算隐藏
+        if (HMA_BENIGN.contains(n)) return true;
+        // 输入法类 App 前缀/模式匹配：覆盖各厂商与版本变体（微信/百度/搜狗/讯飞/QQ/Gboard 等），
+        // 它们常作为 default_input_method 出现，包可见性下查不到属正常，不算 HMA 隐藏
+        if (n.contains("inputmethod") || n.contains("input_method")
+                || n.startsWith("com.baidu.input") || n.startsWith("com.sohu.inputmethod")
+                || n.startsWith("com.tencent.qqpinyin") || n.startsWith("com.tencent.wetype")
+                || n.startsWith("com.iflytek.inputmethod") || n.startsWith("com.google.android.inputmethod")
+                || n.endsWith(".ime") || n.contains(".ime.")) return true;
+        // 高通/联发科/系统服务白名单：这些组件通常不作为独立 APK 安装，不算隐藏
         for (String wl : SVC_WHITELIST) {
             if (n.startsWith(wl.toLowerCase())) return true;
         }
