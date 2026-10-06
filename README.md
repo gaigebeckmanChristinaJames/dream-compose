@@ -50,6 +50,12 @@ gradle assembleRelease
 
 ## 误报修复记录
 
+### v1.2.22
+**风险应用探测能力修复（包可见性）**
+- Manifest 新增 `QUERY_ALL_PACKAGES` 权限：解决 Android 11+ 包可见性限制导致 `getInstalledPackages()`/`getInstalledApplications()` 仅返回少量可见包、扫不到 Alpha/Scene/爱玩机工具箱/KernelSU 等已装风险应用的问题。
+- 说明：安全检测仅凭包名 + 应用元数据即可判定风险应用，无需读取 `/data/app` 下的 APK 文件（该目录受 root 保护，普通文件管理器同样不可读）。
+- 检测点总数不变（离线 349 / 总量 355）。
+
 ### v1.2.21
 **HMA 输入法误报修复（#152/#156）**
 - 输入法良性白名单升级为前缀模糊匹配：微信输入法 `com.tencent.wetype`、百度输入法 `com.baidu.input*`、搜狗输入法 `com.sohu.inputmethod*`、Gboard `com.google.android.inputmethod*`、讯飞/QQ 输入法等。

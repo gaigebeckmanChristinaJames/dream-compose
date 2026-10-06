@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 包可见性：安全检测需枚举全量已安装应用（包名/元数据即可判定风险应用，无需读取 /data/app 文件） -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <!-- 导出 txt 到公共下载目录：Android 9 及以下需要写外部存储（Android 10+ 走 MediaStore 无需权限） -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"

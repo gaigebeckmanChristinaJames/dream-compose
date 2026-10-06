@@ -41,8 +41,8 @@ import java.util.regex.Pattern;
 import javax.crypto.KeyGenerator;
 
 /**
- * 做梦环境检测引擎 v1.2.21
- * 整合：zuomeng_check.sh 34 节 + 春秋检测(Chunqiu)全部检测项(含附录A/B/C) + DuckDetector 15 大检测域可行探针
+ * 做梦环境检测引擎 v1.2.22
+ * 整合：zuomeng_check.sh 34 节 + 通用检测项(含附录A/B/C) + 15 大检测域可行探针
  * 检测点总数约 250，全部在子线程执行；需要 root/native 的探针以"受限(LOW)"级别如实记录。
  */
 public class DetectionEngine {
@@ -218,7 +218,7 @@ public class DetectionEngine {
         return p != null ? p : "不可读";
     }
 
-    // ============ 常量表：脚本 + 春秋附录 + Duck 特征 ============
+    // ============ 常量表：脚本 + 春秋附录 + 通用风险特征 ============
 
     private static final String[][] SU_PATHS = {
         {"/sbin/su","SU /sbin/su"}, {"/system/bin/su","SU /system/bin/su"},
@@ -1240,7 +1240,7 @@ public class DetectionEngine {
                 || "eng".equals(prop("ro.build.type"));
         r(cat,"调试模式综合状态", "ro.debuggable="+prop("ro.debuggable")+" type="+prop("ro.build.type"), debugOn?1:0);
 
-        // ===== Duck-Detector风格高级检测 =====
+        // ===== 高级检测（通用多检测域） =====
         cat = "高级交叉验证";
         // Bootloader/Verified Boot 一致性交叉验证
         String verifiedBootState = prop("ro.boot.verifiedbootstate");

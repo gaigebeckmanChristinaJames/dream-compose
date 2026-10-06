@@ -210,7 +210,7 @@ private fun LocalPanel(state: UiState, onStart: () -> Unit, modifier: Modifier =
         modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)
     ) {
         Text("环境检测", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
-        Text("做梦 · 1.2.21", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("做梦 · 1.2.22", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(12.dp))
 
         Button(
@@ -443,7 +443,7 @@ private fun toast(context: Context, msg: String) { Toast.makeText(context, msg, 
 private fun buildReportText(report: DetectionEngine.Report): String {
     val sorted = report.results.sortedWith(compareBy({ priority(it.level) }))
     val sb = StringBuilder()
-    sb.append("环境检测报告 v1.2.21\n")
+    sb.append("环境检测报告 v1.2.22\n")
     sb.append("总检测:").append(report.total)
         .append(" 正常:").append(report.clean)
         .append(" 可疑:").append(report.warn)
