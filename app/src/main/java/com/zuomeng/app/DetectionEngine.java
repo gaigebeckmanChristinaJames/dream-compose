@@ -1287,20 +1287,20 @@ public class DetectionEngine {
         // ===== v1.2.19 新增检测点（多维度补强；弱特征仅日志，≥2 独立证据才聚合告警；读失败→能力受限） =====
         cat = "v1.2.19 新增";
         // 1) 启动链 & 完整性（基线日志采集，异常需多证据）
-        String vbState = prop("ro.boot.verifiedbootstate");
-        String vbDev = prop("ro.boot.vbmeta.device_state");
-        String flashLocked = prop("ro.boot.flash.locked");
-        String buildTags = prop("ro.build.tags");
+        String vbState19 = prop("ro.boot.verifiedbootstate");
+        String vbDev19 = prop("ro.boot.vbmeta.device_state");
+        String flashLocked19 = prop("ro.boot.flash.locked");
+        String buildTags19 = prop("ro.build.tags");
         r(cat,"启动链 verified-boot/vbmeta 基线",
-                "verifiedbootstate=" + (vbState==null?"不可读":vbState)
-                + " vbmeta_dev=" + (vbDev==null?"不可读":vbDev)
-                + " flash_locked=" + (flashLocked==null?"不可读":flashLocked)
-                + " build_tags=" + (buildTags==null?"不可读":buildTags), 0);
-        String cmdline = read("/proc/cmdline");
-        r(cat,"kernel cmdline bootargs 基线", cmdline==null?"不可读":cmdline.trim(), 0);
-        String secPatch = prop("ro.build.version.security_patch");
-        String vendorPatch = prop("ro.vendor.build.security_patch");
-        r(cat,"security-patch vendor/system 一致性", "system=" + secPatch + " vendor=" + vendorPatch, 0);
+                "verifiedbootstate=" + (vbState19==null?"不可读":vbState19)
+                + " vbmeta_dev=" + (vbDev19==null?"不可读":vbDev19)
+                + " flash_locked=" + (flashLocked19==null?"不可读":flashLocked19)
+                + " build_tags=" + (buildTags19==null?"不可读":buildTags19), 0);
+        String cmdline19 = read("/proc/cmdline");
+        r(cat,"kernel cmdline bootargs 基线", cmdline19==null?"不可读":cmdline19.trim(), 0);
+        String secPatch19 = prop("ro.build.version.security_patch");
+        String vendorPatch19 = prop("ro.vendor.build.security_patch");
+        r(cat,"security-patch vendor/system 一致性", "system=" + secPatch19 + " vendor=" + vendorPatch19, 0);
 
         // 2)+4)+5) 共享：/proc/self/maps 与 status/environ 一次读取
         String maps19 = read("/proc/self/maps");
@@ -1323,8 +1323,8 @@ public class DetectionEngine {
                 natHits>=2 ? 2 : 0);
 
         // 3) SELinux & 内核痕迹（弱特征仅记录）
-        String enforce = shExec("getenforce 2>/dev/null");
-        r(cat,"SELinux 运行模式", enforce==null?"能力受限(getenforce 不可执行)":enforce.trim()+" (弱特征,Permissive需配合其他证据)", 0);
+        String enforce19 = shExec("getenforce 2>/dev/null");
+        r(cat,"SELinux 运行模式", enforce19==null?"能力受限(getenforce 不可执行)":enforce19.trim()+" (弱特征,Permissive需配合其他证据)", 0);
         String modules = read("/proc/modules");
         r(cat,"内核模块残留指纹", modules==null ? "能力受限(普通应用不可读 /proc/modules)" : "可读("+countLines(modules)+"个,策略偏开放,仅记录)", 0);
 
