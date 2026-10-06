@@ -39,7 +39,7 @@ import java.util.regex.Pattern;
 import javax.crypto.KeyGenerator;
 
 /**
- * 做梦环境检测引擎 v1.2.19
+ * 做梦环境检测引擎 v1.2.20
  * 整合：zuomeng_check.sh 34 节 + 春秋检测(Chunqiu)全部检测项(含附录A/B/C) + DuckDetector 15 大检测域可行探针
  * 检测点总数约 250，全部在子线程执行；需要 root/native 的探针以"受限(LOW)"级别如实记录。
  */
@@ -51,9 +51,9 @@ public class DetectionEngine {
     }
 
     /** 检测点总数：离线检测点 + 联网检测点，与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 340;
+    public static final int TOTAL = 345;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 334;
+    public static final int TOTAL_OFFLINE = 339;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -1354,6 +1354,28 @@ public class DetectionEngine {
         // 7) 传统 root 二进制路径（仅日志采集，不单点告警）
         String suPaths = shExec("for p in /system/bin/su /system/xbin/su /debug_ramdisk/su /sbin/su; do [ -e $p ] && echo -n \"$p \"; done 2>/dev/null");
         r(cat,"现代root二进制路径扫描", (suPaths==null||suPaths.trim().isEmpty()) ? "未见" : suPaths.trim()+" (仅日志采集,不单点告警)", 0);
+
+        // ===== v1.2.20 新增（调试/启动链弱特征基线，多证据聚合） =====
+        cat = "v1.2.20 新增";
+        String kver20 = read("/proc/version");
+        r(cat,"内核版本基线", kver20==null?"不可读":kver20.trim(), 0);
+        String dbgProp20 = prop("ro.debuggable");
+        String secureProp20 = prop("ro.secure");
+        r(cat,"调试/安全属性基线", "ro.debuggable="+dbgProp20+" ro.secure="+secureProp20+" (弱特征,仅记录)", 0);
+        String st20b = read("/proc/self/status");
+        String seccomp20 = "不可读";
+        if (st20b != null) for (String l : st20b.split("\n")) if (l.startsWith("Seccomp:")) { seccomp20 = l.trim(); break; }
+        r(cat,"Seccomp 过滤状态", seccomp20, 0);
+        // 调试状态聚合：ro.debuggable=1 与 TracerPid>0 两条独立证据才告警
+        int dbgAgg20 = 0; StringBuilder dbgAggD20 = new StringBuilder();
+        if ("1".equals(dbgProp20)) { dbgAgg20++; dbgAggD20.append("ro.debuggable=1 "); }
+        int tp20b = 0;
+        if (st20b != null) for (String l : st20b.split("\n")) if (l.startsWith("TracerPid:")) { try { tp20b = Integer.parseInt(l.trim().split("\\s+")[1]); } catch (Exception ignored) {} }
+        if (tp20b > 0) { dbgAgg20++; dbgAggD20.append("TracerPid=").append(tp20b).append(' '); }
+        r(cat,"调试状态聚合", dbgAgg20==0 ? "未检出独立调试迹象" : dbgAggD20.toString().trim()+" ("+dbgAgg20+"个独立证据)", dbgAgg20>=2?2:0);
+        String mi20 = read("/proc/mounts");
+        boolean sysRo20 = mi20 != null && mi20.contains(" /system ") && mi20.contains("ro,");
+        r(cat,"/system 挂载只读校验", "/system 只读="+(mi20==null?"不可读":sysRo20)+" (弱特征,需聚合)", 0);
 
         Report rep = new Report();
         rep.results = results;
