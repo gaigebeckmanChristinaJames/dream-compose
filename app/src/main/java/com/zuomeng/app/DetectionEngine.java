@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
 import javax.crypto.KeyGenerator;
 
 /**
- * 做梦环境检测引擎 v1.2.22
+ * 做梦环境检测引擎 v1.2.23
  * 整合：zuomeng_check.sh 34 节 + 通用检测项(含附录A/B/C) + 15 大检测域可行探针
  * 检测点总数约 250，全部在子线程执行；需要 root/native 的探针以"受限(LOW)"级别如实记录。
  */
@@ -53,9 +53,9 @@ public class DetectionEngine {
     }
 
     /** 检测点总数：离线检测点 + 联网检测点，与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 355;
+    public static final int TOTAL = 359;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 349;
+    public static final int TOTAL_OFFLINE = 353;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -1424,6 +1424,21 @@ public class DetectionEngine {
         String kern = kernelIdentityProbe();
         int knLv = detLevel(kern);
         rW(cat,"内核身份与运行时完整性", kern, knLv, aggReason("内核身份与运行时完整性", kern));
+
+        // ===== v1.2.23 新增：读取 /data/app 应用信息 / packages.xml / ADB 多证据 / 运行风险进程 =====
+        cat = "v1.2.23 新增";
+        String adb = adbMultiProbe();
+        int adbLv = detLevel(adb);
+        rW(cat,"ADB调试多证据检测", adb, adbLv, aggReason("ADB调试多证据检测", adb));
+        String procScan = procProcessProbe();
+        int psLv = detLevel(procScan);
+        rW(cat,"运行风险进程检测", procScan, psLv, aggReason("运行风险进程检测", procScan));
+        String px = packagesXmlProbe();
+        int pxLv = detLevel(px);
+        rW(cat,"packages.xml应用记录解析", px, pxLv, aggReason("packages.xml应用记录解析", px));
+        String dataApp = dataAppSourceDirProbe();
+        int daLv = detLevel(dataApp);
+        rW(cat,"读取/data/app应用信息", dataApp, daLv, aggReason("读取/data/app应用信息", dataApp));
 
         Report rep = new Report();
         rep.results = results;
@@ -3079,6 +3094,126 @@ public class DetectionEngine {
         if (ev >= 3) out.append(" | 聚合判定→ABNORMAL");
         else if (ev >= 2) out.append(" | 聚合判定→SUSPECT");
         else out.append(" → 内核/运行时维度未见异常,没问题");
+        return out.toString();
+    }
+
+    // ============ v1.2.23 新增：读取 /data/app 应用信息 / packages.xml / ADB 多证据 / 运行风险进程 ============
+
+    /** 已知风险包名判定（复用 HIGH_PKGS + CHUNQIU_A，两条已知风险源） */
+    private boolean isRiskPkg(String pkg) {
+        for (String p : HIGH_PKGS) if (p.equals(pkg)) return true;
+        for (String p : CHUNQIU_A) if (p.equals(pkg)) return true;
+        return false;
+    }
+
+    /** ADB 调试多证据检测：Settings 开关 + 5555 端口监听 + ro.debuggable + adb_keys，≥2 聚合→SUSPECT */
+    private String adbMultiProbe() {
+        int ev = 0; StringBuilder detail = new StringBuilder();
+        // 证据1：系统 ADB 开关（弱证据；系统 UI 可能隐藏开关但服务未关闭）
+        String adbOn = readSetting("global", "adb_enabled");
+        if (adbOn != null && "1".equals(adbOn.trim())) { ev++; detail.append("Settings.adb_enabled=1[弱]; "); }
+        // 证据2：5555 端口(0x15B3)监听或活动（佐证；ADB 网络调试端口）
+        String tcp = read("/proc/net/tcp");
+        if (tcp != null) {
+            for (String l : tcp.split("\n")) {
+                if (l.contains(":15B3")) { ev++; detail.append("5555端口在/proc/net/tcp(0x15B3)[佐证]; "); break; }
+            }
+        }
+        // 证据3：ro.debuggable（弱证据；工程/测试固件为1）
+        String dbg = prop("ro.debuggable");
+        if (dbg != null && "1".equals(dbg.trim())) { ev++; detail.append("ro.debuggable=1[弱]; "); }
+        // 证据4：adb 授权密钥文件（佐证；存在即曾授权 adb）
+        if (exists("/data/misc/adb/adb_keys") || exists("/data/misc/adb/adb_key")) { ev++; detail.append("adb_keys授权文件存在[佐证]; "); }
+        StringBuilder out = new StringBuilder();
+        out.append("ADB证据数=").append(ev);
+        if (detail.length() > 0) out.append("(证据:").append(detail.toString().trim()).append(")");
+        if (ev >= 2) out.append(" | 聚合判定→SUSPECT(ADB调试实际开启,即使系统UI隐藏)");
+        else if (ev == 1) out.append(" | 单证据仅日志(ADB可能开启,需复核)");
+        else out.append(" → 未检出ADB调试开启,没问题");
+        return out.toString();
+    }
+
+    /** 运行风险进程检测：扫描 /proc 各 pid 的 cmdline；强标记单条→SUSPECT，弱标记≥2→SUSPECT */
+    private String procProcessProbe() {
+        int strong = 0; int weak = 0;
+        List<String> strongHits = new ArrayList<>();
+        List<String> weakHits = new ArrayList<>();
+        File proc = new File("/proc");
+        File[] pids = proc.listFiles();
+        if (pids == null) return "【能力受限】/proc 不可读，无法枚举进程；仅日志，不告警";
+        for (File pf : pids) {
+            if (!pf.isDirectory()) continue;
+            if (!pf.getName().matches("\\d+")) continue;
+            String cmd = read(pf.getAbsolutePath() + "/cmdline");
+            if (cmd == null || cmd.trim().isEmpty()) continue;
+            String cl = cmd.toLowerCase(Locale.US);
+            // 强标记（无歧义的作弊/Hook 服务进程）
+            for (String s : new String[]{"frida", "gdbserver", "android_server", "lspd", "riru", "edxposed", "sandhook"}) {
+                if (cl.contains(s)) { strong++; strongHits.add(s + "(pid=" + pf.getName() + ")"); break; }
+            }
+            // 弱标记（root 守护进程）
+            for (String s : new String[]{"magiskd", "ksud", "su -c", "/system/bin/su", "/sbin/su"}) {
+                if (cl.contains(s)) { weak++; weakHits.add(s + "(pid=" + pf.getName() + ")"); break; }
+            }
+        }
+        StringBuilder out = new StringBuilder();
+        out.append("风险进程: 强标记=").append(strong).append(" 弱标记=").append(weak);
+        if (!strongHits.isEmpty()) out.append("(强:").append(String.join(",", strongHits)).append(")");
+        if (!weakHits.isEmpty()) out.append("(弱:").append(String.join(",", weakHits)).append(")");
+        if (strong >= 1) out.append(" | 强标记命中→SUSPECT(作弊/Hook服务进程)");
+        else if (weak >= 2) out.append(" | 弱标记≥2→SUSPECT(root守护进程)");
+        else if (weak == 1) out.append(" | 单弱标记仅日志");
+        else out.append(" → 未检出风险进程,没问题");
+        return out.toString();
+    }
+
+    /** packages.xml 应用记录解析：可读性即特权信号，解析风险包名聚合判定 */
+    private String packagesXmlProbe() {
+        String xml = read("/data/system/packages.xml");
+        if (xml == null || xml.isEmpty()) return "【能力受限】packages.xml 不可读(非特权环境)，无法解析应用安装记录；仅日志，不告警";
+        int ev = 1; StringBuilder detail = new StringBuilder("packages.xml可读(特权信号); ");
+        List<String> risk = new ArrayList<>();
+        for (String p : HIGH_PKGS) { if (xml.contains("name=\"" + p + "\"")) risk.add(p); }
+        for (String p : CHUNQIU_A) { if (xml.contains("name=\"" + p + "\"")) risk.add(p); }
+        if (!risk.isEmpty()) { ev++; detail.append("packages.xml含风险包记录[").append(risk.size()).append("]:").append(String.join(",", risk)).append("; "); }
+        StringBuilder out = new StringBuilder();
+        out.append("证据数=").append(ev);
+        if (detail.length() > 0) out.append("(证据:").append(detail.toString().trim()).append(")");
+        if (ev >= 2) out.append(" | 聚合判定→SUSPECT(特权文件系统+风险包记录)");
+        else out.append(" | 单证据(packages.xml可读)仅日志");
+        return out.toString();
+    }
+
+    /** 读取 /data/app 全量应用信息：sourceDir 枚举 + 原始目录可读性，聚合判定 */
+    private String dataAppSourceDirProbe() {
+        int ev = 0; StringBuilder detail = new StringBuilder();
+        int pmOk = 0;
+        List<String> riskSrc = new ArrayList<>();
+        try {
+            List<ApplicationInfo> ais = ctx.getPackageManager().getInstalledApplications(PackageManager.GET_META_DATA);
+            pmOk = 1;
+            for (ApplicationInfo ai : ais) {
+                if (isRiskPkg(ai.packageName)) {
+                    if (ai.sourceDir != null && ai.sourceDir.startsWith("/data/app/"))
+                        riskSrc.add(ai.packageName + "@" + ai.sourceDir);
+                }
+            }
+        } catch (Exception e) { pmOk = 0; }
+        if (!riskSrc.isEmpty()) { ev++; detail.append("风险包 /data/app sourceDir 命中[").append(riskSrc.size()).append("]:").append(String.join(",", riskSrc)).append("; "); }
+        // 原始 /data/app 目录可读（特权信号）
+        String ls = shExec("ls /data/app 2>/dev/null");
+        if (ls != null && !ls.trim().isEmpty()
+                && !ls.trim().toLowerCase(Locale.US).contains("permission denied")
+                && !ls.trim().toLowerCase(Locale.US).contains("no such")) {
+            ev++; detail.append("/data/app 目录可读(特权信号); ");
+        }
+        if (pmOk == 0) detail.append("PM枚举失败; ");
+        StringBuilder out = new StringBuilder();
+        out.append("证据数=").append(ev);
+        if (detail.length() > 0) out.append("(证据:").append(detail.toString().trim()).append(")");
+        if (ev >= 2) out.append(" | 聚合判定→SUSPECT(特权读取 /data/app + 风险包)");
+        else if (ev == 1) out.append(" | 单证据仅日志");
+        else out.append(" → 未检出特权读取或风险应用,没问题");
         return out.toString();
     }
 

@@ -11,8 +11,8 @@ android {
         applicationId = "com.zuomeng.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 24
-        versionName = "1.2.22"
+        versionCode = 25
+        versionName = "1.2.23"
     }
 
     buildTypes {

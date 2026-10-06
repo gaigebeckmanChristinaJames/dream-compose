@@ -1,6 +1,6 @@
 # 做梦 · 环境检测 (dream-compose)
 
-一款基于 Jetpack Compose + Material 3 的 Android 设备环境检测工具，覆盖 **355 项**离线/在线检测点，帮助判断设备是否存在 Root、Hook、模拟器、多开、隐藏应用等异常环境。
+一款基于 Jetpack Compose + Material 3 的 Android 设备环境检测工具，覆盖 **359 项**离线/在线检测点，帮助判断设备是否存在 Root、Hook、模拟器、多开、隐藏应用等异常环境。
 
 ## 功能特性
 
@@ -49,6 +49,16 @@ gradle assembleRelease
 ```
 
 ## 误报修复记录
+
+### v1.2.23
+**新增检测点（4 项，全部多证据聚合、弱特征仅日志、能力受限不告警，低误报）**
+- **ADB 调试多证据检测**：`Settings.adb_enabled` + 5555 端口监听 + `ro.debuggable` + `adb_keys` 授权文件，≥2 条证据聚合才 SUSPECT。**即使系统 UI 隐藏 ADB 开关、但服务/端口未真正关闭，也能检出 ADB 调试开启**。
+- **运行风险进程检测**：遍历 `/proc/*/cmdline` 匹配作弊/Hook 服务进程（frida、gdbserver、android_server、lspd/riru 等强标记）与 root 守护进程（magiskd、ksud、su 等弱标记）。强标记单条即 SUSPECT，弱标记需 ≥2 条聚合，避免误报。
+- **packages.xml 应用记录解析**：非特权环境不可读时输出「能力受限」仅日志不告警；可读（特权信号）时解析风险包名，聚合判定。
+- **读取 /data/app 应用信息**：全量包 `sourceDir` 枚举（支持包可见性）+ 原始 `/data/app` 目录可读性（特权信号），风险包 + 特权读取聚合判定。
+
+**版本与总量**
+- 版本升级至 v1.2.23（versionCode 25）；离线检测点增至 353、总量 359。
 
 ### v1.2.22
 **风险应用探测能力修复（包可见性）**
