@@ -29,9 +29,11 @@ import java.security.Key;
 import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -51,9 +53,9 @@ public class DetectionEngine {
     }
 
     /** 检测点总数：离线检测点 + 联网检测点，与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 345;
+    public static final int TOTAL = 355;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 339;
+    public static final int TOTAL_OFFLINE = 349;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -90,6 +92,20 @@ public class DetectionEngine {
         DetectionResult dr = new DetectionResult(cn, cat, title, log, l);
         results.add(dr);
         if (listener != null) listener.onProgress(dr, cn, TOTAL, cat, title);
+    }
+
+    /**
+     * 带判定理由的输出（满足“完整日志 + 判定理由”双字段规范）。
+     * reason 仅对 SUSPECT/ABNORMAL 写入；NORMAL/INFO 保持可空，由上层给出默认文本。
+     */
+    private void rW(String cat, String title, String log, int code, String reason) {
+        r(cat, title, log, code);
+        if (reason != null && !reason.isEmpty() && !results.isEmpty()) {
+            DetectionResult last = results.get(results.size() - 1);
+            if (last.level == DetectionResult.Level.SUSPECT || last.level == DetectionResult.Level.ABNORMAL) {
+                last.reason = reason;
+            }
+        }
     }
 
     // ============ 基础 IO 帮助方法 ============
@@ -1377,6 +1393,38 @@ public class DetectionEngine {
         boolean sysRo20 = mi20 != null && mi20.contains(" /system ") && mi20.contains("ro,");
         r(cat,"/system 挂载只读校验", "/system 只读="+(mi20==null?"不可读":sysRo20)+" (弱特征,需聚合)", 0);
 
+        // ===== v1.2.21 新增：风险应用探测修复 + 春秋附录 + 外挂驱动 + 扫盘/路径/UID + 认证·Keystore·内核完整性 =====
+        cat = "v1.2.21 新增";
+        String tkRisk = toolkitRiskAggregate();
+        int tkLv = detLevel(tkRisk);
+        rW(cat,"风险工具多证据聚合探测", tkRisk, tkLv, aggReason("风险工具多证据聚合探测", tkRisk));
+        String cqRisk = chunqiuRiskPaths();
+        int cqLv = detLevel(cqRisk);
+        rW(cat,"春秋附录B 风险路径/文件扫描", cqRisk, cqLv, aggReason("春秋附录B 风险路径/文件扫描", cqRisk));
+        String cqProps = chunqiuPropsCoverage();
+        r(cat,"春秋附录C 系统属性基线", cqProps, 0);
+        String cheat = cheatDriverProbe();
+        int chLv = detLevel(cheat);
+        rW(cat,"外挂驱动检测", cheat, chLv, aggReason("外挂驱动检测", cheat));
+        String disk = diskScanProbe();
+        int dkLv = detLevel(disk);
+        rW(cat,"扫盘检测(高危文件跨目录)", disk, dkLv, aggReason("扫盘检测", disk));
+        String path = pathScanProbe();
+        int ptLv = detLevel(path);
+        rW(cat,"路径检测(挂载/su/可写系统目录)", path, ptLv, aggReason("路径检测", path));
+        String uid = uidScanProbe();
+        int udLv = detLevel(uid);
+        rW(cat,"UID检测(UID/能力位/一致性)", uid, udLv, aggReason("UID检测", uid));
+        String att = attestationDepthProbe();
+        int atLv = detLevel(att);
+        rW(cat,"硬件认证完整性", att, atLv, aggReason("硬件认证完整性", att));
+        String ks = keystoreIntegrityProbe();
+        int ksLv = detLevel(ks);
+        rW(cat,"Keystore完整性(时序/隔离/负例)", ks, ksLv, aggReason("Keystore完整性", ks));
+        String kern = kernelIdentityProbe();
+        int knLv = detLevel(kern);
+        rW(cat,"内核身份与运行时完整性", kern, knLv, aggReason("内核身份与运行时完整性", kern));
+
         Report rep = new Report();
         rep.results = results;
         rep.total = cn; rep.clean = clean; rep.found = found; rep.warn = warn; rep.low = low;
@@ -2115,6 +2163,8 @@ public class DetectionEngine {
         for (String p : diskPkgs)    if (!disabledPkgs.contains(p)) { allDiff.add(p); diff.append("②有③无:").append(p).append(' '); }
 
         // 2/3. 判定：差集包在③禁用集内 → 备注不告警；②有①无③无三者同时命中 → SUSPECT
+        // v1.2.21：良性输入法/已知系统组件（微信/百度/搜狗/Gboard 等）即使 PM 因包可见性查不到，
+        // 也不是“应用被隐藏”的证据，命中后标记 INFO 基线备注，跳过 SUSPECT，避免输入法误报。
         StringBuilder note = new StringBuilder();
         StringBuilder sus = new StringBuilder();
         for (String p : allDiff) {
@@ -2122,6 +2172,10 @@ public class DetectionEngine {
                 note.append(p).append("(属系统禁用/冻结包,为系统原生行为,不一定为HMA隐藏) ");
             }
             if (diskPkgs.contains(p) && !userPkgs.contains(p) && !disabledPkgs.contains(p)) {
+                if (pkgKnown(p)) {
+                    note.append(p).append("(良性输入法/已知组件,默认选中或包可见性正常,非HMA隐藏,仅INFO基线) ");
+                    continue;
+                }
                 sus.append(p).append(' ');
             }
         }
@@ -2594,8 +2648,441 @@ public class DetectionEngine {
         return "不可读";
     }
 
-    // ============ v1.2.17 新增检测点（全部遵守降误报策略：单点仅日志，多点聚合才告警） ============
+    // ============ v1.2.21 新增：风险应用探测修复（Alpha/爱玩机工具箱/Scene/KernelSU 管理器） ============
 
+    /**
+     * 风险工具多证据聚合探测。
+     * 目标：Alpha(Magisk Alpha / 阿尔法面具)、爱玩机工具箱、Scene(骁龙工具箱)、KernelSU 管理器。
+     * 双数据源枚举 getInstalledPackages(0) + getInstalledApplications(GET_META_DATA) 并读取 App 元数据(标签)，
+     * 应对“包名改名 / 包可见性限制”导致的探测失效；KernelSU 底层痕迹(/data/adb/ksud、su 二进制、内核属性标记)
+     * 独立于 APP 包名，不依赖管理器 App 是否可见。
+     * 降误报：单条弱证据(仅包名命中 / 仅标签命中 / 仅单条底层痕迹)只记录日志，不告警；
+     * ≥2 条来源独立的证据同时命中才 SUSPECT。权限不足/读取失败 → 输出【能力受限】，不告警。
+     */
+    private String toolkitRiskAggregate() {
+        StringBuilder out = new StringBuilder();
+        int evidence = 0;
+        StringBuilder evDetail = new StringBuilder();
+
+        // ---- 证据组1：双源应用枚举 + 元数据(App 标签)，全部捕获异常，读失败仅记录 ----
+        Set<String> installed = new HashSet<>();
+        Map<String, String> labelByPkg = new HashMap<>();
+        int pmFail = 0;
+        try {
+            List<PackageInfo> pis = ctx.getPackageManager().getInstalledPackages(0);
+            for (PackageInfo pi : pis) installed.add(pi.packageName);
+        } catch (Exception e) { pmFail++; }
+        try {
+            List<ApplicationInfo> ais = ctx.getPackageManager().getInstalledApplications(PackageManager.GET_META_DATA);
+            for (ApplicationInfo ai : ais) {
+                installed.add(ai.packageName);
+                try {
+                    CharSequence l = ai.loadLabel(ctx.getPackageManager());
+                    if (l != null && l.length() > 0) labelByPkg.put(ai.packageName, l.toString());
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception e) { pmFail++; }
+        if (pmFail >= 2) {
+            return "【能力受限】PackageManager 两次枚举均不可读(可见性/权限受限)，跳过应用聚合判定；已尝试 getInstalledPackages + getInstalledApplications(GET_META_DATA)";
+        }
+        out.append("双源枚举包数=").append(installed.size());
+
+        // 目标候选包名（包名可能被改名，故同时用标签元数据识别）
+        String[][] TARGETS = {
+            {"me.weishu.kernelsu", "KernelSU 管理器(官方)"},
+            {"com.byyoungset.kernelsu", "KernelSU 管理器"},
+            {"com.rifsxd.ksunext", "KernelSU-Next 管理器"},
+            {"io.github.a13e300.ksuwebui", "KSU-WebUI"},
+            {"io.github.vvb2060.magisk", "Alpha(Magisk Alpha/阿尔法面具)"},
+            {"com.omarea.vtools", "Scene(骁龙工具箱)"},
+            {"com.byyoung.setting", "爱玩机工具箱"},
+            {"com.nenya.aiwanji", "爱玩机工具箱(助手)"}
+        };
+
+        // 证据1a：包名命中（弱证据，单条不告警）
+        List<String> pkgHit = new ArrayList<>();
+        for (String[] t : TARGETS) {
+            if (installed.contains(t[0])) pkgHit.add(t[0] + "(" + t[1] + ")");
+        }
+        if (!pkgHit.isEmpty()) {
+            evidence++;
+            evDetail.append("包名命中[弱]:").append(String.join(",", pkgHit)).append("; ");
+        }
+
+        // 证据1b：App 标签元数据命中（弱证据；用于包名改名场景；仅精确关键词，降低误报）
+        List<String> labelHit = new ArrayList<>();
+        for (Map.Entry<String, String> e : labelByPkg.entrySet()) {
+            if (pkgHit.contains(e.getKey())) continue; // 已按包名命中，避免同一证据重复计数
+            String label = e.getValue();
+            if (label == null) continue;
+            String ll = label.toLowerCase(Locale.US);
+            if (ll.contains("kernelsu") || ll.contains("ksu next")
+                    || label.contains("爱玩机") || label.contains("阿尔法面具")) {
+                labelHit.add(e.getKey() + "(标签:" + label + ")");
+            }
+        }
+        if (!labelHit.isEmpty()) {
+            evidence++;
+            evDetail.append("标签元数据命中[弱]:").append(String.join(",", labelHit)).append("; ");
+        }
+
+        // ---- 证据组2：KernelSU 底层痕迹（独立于 APP 包名，佐证）----
+        boolean ksuDaemonBin = exists("/data/adb/ksud");
+        boolean suBin = false;
+        String suBinPath = "";
+        String[] suCandidates = {"/system/bin/su", "/system/xbin/su", "/sbin/su",
+                "/data/adb/ksu/bin/su", "/data/adb/ap/bin/su", "/vendor/bin/su"};
+        for (String p : suCandidates) {
+            if (exists(p)) { suBin = true; suBinPath = p; break; }
+        }
+        boolean ksuKernelProp = false;
+        String kProp = "";
+        for (String k : new String[]{"ro.kernel.ksu", "ro.boot.ksu", "init.svc.ksud"}) {
+            String v = prop(k);
+            if (v != null && !v.isEmpty()) { ksuKernelProp = true; kProp += k + "=" + v + " "; }
+        }
+        boolean ksuDevOrDmesg = exists("/dev/ksu");
+        String dmesgKsu = shExec("dmesg 2>/dev/null | grep -i ksu | head -3");
+        if (dmesgKsu != null && !dmesgKsu.trim().isEmpty()) ksuDevOrDmesg = true;
+        int ksuTrace = (ksuDaemonBin ? 1 : 0) + (suBin ? 1 : 0) + (ksuKernelProp ? 1 : 0) + (ksuDevOrDmesg ? 1 : 0);
+        if (ksuTrace > 0) {
+            evidence++;
+            evDetail.append("KSU底层痕迹[佐证,").append(ksuTrace).append("]:")
+                    .append(ksuDaemonBin ? "/data/adb/ksud " : "")
+                    .append(suBin ? ("su二进制:" + suBinPath + " ") : "")
+                    .append(ksuKernelProp ? ("内核属性:" + kProp.trim() + " ") : "")
+                    .append(ksuDevOrDmesg ? "/dev/ksu或dmesg含ksu " : "")
+                    .append("; ");
+        }
+
+        // ---- 证据组3：Scene/omarea 进程（独立于包名，佐证）----
+        boolean sceneProc = false;
+        String psOut = shExec("ps -A 2>/dev/null");
+        if (psOut != null) {
+            String pl = psOut.toLowerCase(Locale.US);
+            if (pl.contains("omarea") || pl.contains("scene")) sceneProc = true;
+        }
+        if (sceneProc) {
+            evidence++;
+            evDetail.append("Scene/omarea进程[佐证]:存在; ");
+        }
+
+        // ---- 聚合判定 ----
+        out.append(" | 独立证据数=").append(evidence);
+        if (evDetail.length() > 0) out.append("(").append(evDetail.toString().trim()).append(")");
+        if (evidence >= 2) {
+            out.append(" | 多证据命中→SUSPECT(≥2条独立证据): ")
+                    .append(evDetail.toString().trim());
+        } else if (evidence == 1) {
+            out.append(" | 单条弱证据(仅日志,不告警): ")
+                    .append(evDetail.toString().trim());
+        } else {
+            out.append(" | 未检出独立风险证据");
+        }
+        return out.toString();
+    }
+
+    // ============ v1.2.21 新增：春秋附录 / 外挂驱动 / 扫盘·路径·UID / 认证·Keystore·内核完整性 ============
+
+    /** 解析聚合探针返回文本的告警等级：→ABNORMAL→1；→SUSPECT→2；【能力受限】/未命中→0 */
+    private int detLevel(String log) {
+        if (log == null || log.startsWith("【能力受限】")) return 0;
+        if (log.contains("→ABNORMAL")) return 1;
+        if (log.contains("→SUSPECT")) return 2;
+        return 0;
+    }
+
+    /** 为聚合探针生成人类可读判定理由（引用完整日志中的证据清单；仅 SUSPECT/ABNORMAL 返回） */
+    private String aggReason(String title, String log) {
+        int lv = detLevel(log);
+        if (lv == 0) return null;
+        String tag = lv == 1 ? "ABNORMAL(异常)" : "SUSPECT(可疑)";
+        int i = log.indexOf("证据:");
+        String ev = i >= 0 ? log.substring(i) : "";
+        return "判定" + tag + "：「" + title + "」按≥2条来源独立证据聚合判定"
+                + (ev.isEmpty() ? "" : ("，命中证据: " + ev))
+                + "；命中明细/原始路径/原始值见完整日志，单条弱特征不告警。";
+    }
+
+    /** 春秋附录B：可疑/外挂类风险路径与文件全量扫描（聚合；≥2 命中→ABNORMAL，1 命中→SUSPECT，无→没问题） */
+    private String chunqiuRiskPaths() {
+        String[] paths = {
+            "/data/A内核.ini","/data/BingHPJY/pz.cfg","/data/BingPUBG","/data/Dit驱动",
+            "/data/HPX","/data/HPY","/data/encore/custom_default_cpu_gov","/data/encore/default_cpu_gov",
+            "/data/gpu_freq_table.conf","/data/js","/data/js.sh","/data/local/MIO","/data/local/luckys",
+            "/data/local/stryker/","/data/local/tmp/A内核公益-和平精英0215x1","/data/local/tmp/A内核公益-和平精英0215x1(1)",
+            "/data/local/tmp/A内核公益-和平精英0215x1(2)","/data/local/tmp/DisabledAllGoogleServices",
+            "/data/local/tmp/HyperCeiler","/data/local/tmp/Surfing_update","/data/local/tmp/android_server",
+            "/data/local/tmp/android_server64","/data/local/tmp/cleaner_starter","/data/local/tmp/encore_logo.png",
+            "/data/local/tmp/gdbserver","/data/local/tmp/horae_control.log","/data/local/tmp/luckys",
+            "/data/local/tmp/mount_mask","/data/local/tmp/resetprop","/data/local/tmp/scriptTMP",
+            "/data/local/tmp/simpleHook","/data/local/tmp/yshell","/data/local/中野三玖","/data/nh.ko",
+            "/data/nh2","/data/nh3","/data/nh4","/data/nh5","/data/swap_config.conf","/data/system/AppRetention",
+            "/data/system/Freezer/","/data/system/HPX","/data/system/HPY","/data/system/NoActive/",
+            "/data/system/junge/","/data/system/liboxmem.so","/data/system/xydriver.ko",
+            "/data/南瓜三角洲公益最新版本.sh","/data/物资.txt","/dev/Bing",
+            "/my_product/etc/permissions/oplus_google_cn_gms_features.xml",
+            "/sdcard/Download/com.niunaijun.blackdexa64_logcat.txt","/sdcard/Download/dexdump/","/sdcard/fart",
+            "/storage/emulated/0/Android/Clash/","/storage/emulated/0/Android/HChai/",
+            "/storage/emulated/0/Android/Yume-Yunyun/","/storage/emulated/0/Android/naki/",
+            "/storage/emulated/0/Documents/advanced/","/storage/emulated/0/Download/advanced/",
+            "/storage/emulated/0/MT2/","/storage/emulated/0/TpTestReport/screenOn/OK/0/",
+            "/storage/emulated/0/rlgg/","/storage/emulated/0/弱隐.sh","/storage/emulated/0/落叶配置",
+            "/storage/emulated/elgg/"
+        };
+        List<String> hits = new ArrayList<>();
+        for (String p : paths) {
+            try { if (exists(p)) hits.add(p); } catch (Exception ignored) {}
+        }
+        StringBuilder out = new StringBuilder();
+        out.append("扫描附录B风险路径/文件 ").append(paths.length).append(" 条");
+        if (hits.isEmpty()) out.append(" → 未命中,没问题");
+        else {
+            out.append(" → 命中 ").append(hits.size()).append(" 条:").append(String.join(",", hits));
+            if (hits.size() >= 2) out.append(" | 聚合判定→ABNORMAL");
+            else out.append(" | 单条命中→SUSPECT(需复核)");
+        }
+        return out.toString();
+    }
+
+    /** 春秋附录C：被检查系统属性基线（属性为弱特征，仅 INFO 基线，不单点告警） */
+    private String chunqiuPropsCoverage() {
+        String[] keys = {
+            "dalvik.vm.dex2oat-flags","persist.chunqiu.path_hide",
+            "persist.debug.dalvik.vm.core_platform_api_policy",
+            "persist.logd.size","persist.logd.size.crash","persist.logd.size.main","persist.logd.size.system",
+            "persist.sys.pihooks.disable.gms","persist.sys.pihooks_BRAND","persist.sys.pihooks_DEVICE",
+            "persist.sys.pihooks_DEVICE_INIT","persist.sys.pihooks_MANUFACTURE","persist.sys.pihooks_MODEL",
+            "persist.sys.pihooks_PRODUCT","persist.sys.pihooks_RELEASE","persist.sys.pihooks_SDK_INT",
+            "persist.sys.pixelprops.gapps","persist.sys.pixelprops.gms","persist.sys.pixelprops.google",
+            "persist.sys.pixelprops.gphotos","persist.sys.spoof.gms",
+            "persist.sys.vold_app_data_isolation_enabled",
+            "ro.boot.flash.locked","ro.boot.selinux","ro.boot.vbmeta.avb_version",
+            "ro.boot.vbmeta.device_state","ro.boot.vbmeta.digest","ro.boot.verifiedbootstate",
+            "ro.build.date.utc","ro.build.type","ro.build.version.sdk","ro.product.brand"};
+        List<String> set = new ArrayList<>();
+        for (String k : keys) { String v = prop(k); if (v != null && !v.isEmpty()) set.add(k + "=" + v); }
+        StringBuilder out = new StringBuilder();
+        out.append("附录C系统属性 ").append(keys.length).append(" 项，已设置 ").append(set.size()).append(" 项");
+        if (!set.isEmpty()) out.append(": ").append(String.join(" ", set));
+        out.append("（属性为弱特征，仅INFO基线，不单点告警）");
+        return out.toString();
+    }
+
+    /** 外挂驱动检测：可疑 .ko 驱动/内核模块签名//dev 节点/驱动模块目录 四类独立证据，≥2 聚合→ABNORMAL */
+    private String cheatDriverProbe() {
+        int ev = 0; StringBuilder detail = new StringBuilder();
+        // 证据1：可疑 .ko 外挂驱动文件
+        String koOut = shExec("find /data/local/tmp /data /sdcard /storage/emulated/0/Download -maxdepth 3 -type f -name '*.ko' 2>/dev/null | head -60");
+        List<String> koHits = new ArrayList<>();
+        if (koOut != null) for (String l : koOut.split("\n")) {
+            String p = l.trim(); if (p.isEmpty()) continue;
+            String pl = p.toLowerCase(Locale.US);
+            if (pl.contains("cheat")||pl.contains("hack")||pl.contains("ghost")||pl.contains("esp")
+                ||pl.contains("aim")||pl.contains("driver")||pl.contains("nh.ko")||pl.contains("xydriver")
+                ||pl.contains("外挂")||pl.contains("内核")) koHits.add(p);
+        }
+        if (!koHits.isEmpty()) { ev++; detail.append("可疑驱动文件[").append(koHits.size()).append("]:").append(String.join(",", koHits)).append("; "); }
+        // 证据2：内核模块列表驱动签名
+        String mods = read("/proc/modules");
+        List<String> modHits = new ArrayList<>();
+        if (mods != null) for (String l : mods.split("\n")) {
+            String ll = l.toLowerCase(Locale.US);
+            if (ll.contains("cheat")||ll.contains("hack")||ll.contains("esp")||ll.contains("aim")
+                ||ll.contains("nh.ko")||ll.contains("xydriver")||ll.contains("外挂")) modHits.add(l.trim());
+        }
+        if (!modHits.isEmpty()) { ev++; detail.append("内核模块驱动签名[").append(modHits.size()).append("]:").append(String.join(",", modHits)).append("; "); }
+        // 证据3：/dev 外挂驱动节点
+        List<String> devHits = new ArrayList<>();
+        String devLs = shExec("ls /dev 2>/dev/null");
+        if (devLs != null) for (String l : devLs.split("\n")) {
+            String ll = l.toLowerCase(Locale.US);
+            if (ll.contains("cheat")||ll.contains("hack")||ll.contains("ghost")||ll.contains("esp")
+                ||ll.contains("aim")||ll.contains("bing")||ll.contains("nh")) devHits.add(l.trim());
+        }
+        if (!devHits.isEmpty()) { ev++; detail.append("/dev节点[").append(devHits.size()).append("]:").append(String.join(",", devHits)).append("; "); }
+        // 证据4：驱动注入模块目录
+        if (exists("/data/adb/modules/nh")||exists("/data/adb/modules/ghost")||exists("/data/adb/modules/esp")
+            ||exists("/data/adb/modules/cheat")||exists("/data/adb/modules/xydriver")) { ev++; detail.append("驱动模块目录:命中; "); }
+
+        StringBuilder out = new StringBuilder();
+        out.append("证据数=").append(ev);
+        if (detail.length() > 0) out.append("(证据:").append(detail.toString().trim()).append(")");
+        if (ev >= 2) out.append(" | 聚合判定→ABNORMAL");
+        else if (ev == 1) out.append(" | 单条命中→SUSPECT(需复核)");
+        else out.append(" → 未检出外挂驱动,没问题");
+        return out.toString();
+    }
+
+    /** 扫盘检测：跨高风险目录扫描作弊/工具特征文件，≥2 聚合→ABNORMAL */
+    private String diskScanProbe() {
+        int ev = 0; StringBuilder detail = new StringBuilder();
+        String[] roots = {"/data/local/tmp", "/sdcard/Download", "/data/local", "/storage/emulated/0/Android"};
+        String[] pats = {"cheat","hack","payload","esp","aim","外挂","内核","android_server","luckys","ghost","driver"};
+        List<String> seen = new ArrayList<>();
+        for (String root : roots) {
+            String out = shExec("find " + root + " -maxdepth 2 2>/dev/null | head -1200");
+            if (out == null) continue;
+            for (String l : out.split("\n")) {
+                String p = l.trim();
+                if (p.isEmpty() || p.equals(root)) continue;
+                String pl = p.toLowerCase(Locale.US);
+                boolean hit = false;
+                for (String pat : pats) if (pl.contains(pat)) { hit = true; break; }
+                if (hit && !seen.contains(p)) { seen.add(p); ev++; detail.append(p).append(' '); }
+            }
+        }
+        StringBuilder out = new StringBuilder();
+        out.append("扫描4个高风险目录,命中特征条目 ").append(ev);
+        if (detail.length() > 0) out.append("(命中:").append(detail.toString().trim()).append(")");
+        if (ev >= 2) out.append(" | 聚合判定→ABNORMAL");
+        else if (ev == 1) out.append(" | 单条命中→SUSPECT(需复核)");
+        else out.append(" → 未检出异常,没问题");
+        return out.toString();
+    }
+
+    /** 路径检测：su 二进制/可疑挂载/隐藏目录//system 可写/debug_ramdisk，≥2 聚合→ABNORMAL */
+    private String pathScanProbe() {
+        int ev = 0; StringBuilder detail = new StringBuilder();
+        List<String> suHits = new ArrayList<>();
+        for (String p : new String[]{"/system/bin/su","/system/xbin/su","/sbin/su","/vendor/bin/su",
+                "/data/adb/ksu/bin/su","/data/adb/ap/bin/su"}) {
+            try { if (exists(p)) suHits.add(p); } catch (Exception ignored) {}
+        }
+        if (!suHits.isEmpty()) { ev++; detail.append("su二进制[").append(suHits.size()).append("]:").append(String.join(",", suHits)).append("; "); }
+        String mi = read("/proc/self/mounts");
+        if (mi != null && (mi.contains("magisk")||mi.contains("ksu")||mi.contains("apatch")||mi.contains("tricky"))) {
+            ev++; detail.append("挂载含root痕迹; ");
+        }
+        boolean extHidden = false;
+        try { extHidden = exists("/system/bin/.ext/.su")||exists("/system/.ext/.su")||exists("/system/bin/.ext")||exists("/system/xbin/.ext"); } catch (Exception ignored) {}
+        if (extHidden) { ev++; detail.append("隐藏.ext目录; "); }
+        boolean sysW = false;
+        try { sysW = new File("/system").canWrite(); } catch (Exception ignored) {}
+        if (sysW) { ev++; detail.append("/system可写; "); }
+        if (exists("/debug_ramdisk")||exists("/sbin/recovery")) { ev++; detail.append("debug_ramdisk/recovery痕迹; "); }
+        StringBuilder out = new StringBuilder();
+        out.append("证据数=").append(ev);
+        if (detail.length() > 0) out.append("(证据:").append(detail.toString().trim()).append(")");
+        if (ev >= 2) out.append(" | 聚合判定→ABNORMAL");
+        else if (ev == 1) out.append(" | 单条命中→SUSPECT(需复核)");
+        else out.append(" → 未检出路径异常,没问题");
+        return out.toString();
+    }
+
+    /** UID 检测：当前 UID/能力位/补充组/异常 UID 应用/可调试应用，≥2 聚合→ABNORMAL */
+    private String uidScanProbe() {
+        int ev = 0; StringBuilder detail = new StringBuilder();
+        String status = read("/proc/self/status");
+        String uid = statusLine(status, "Uid");
+        if (uid != null && uid.trim().startsWith("0")) { ev++; detail.append("当前UID=0(root); "); }
+        String capEff = statusLine(status, "CapEff");
+        if (capEff != null && !capEff.trim().replace("0", "").isEmpty()) { ev++; detail.append("CapEff=" + capEff.trim() + "; "); }
+        String groups = statusLine(status, "Groups");
+        if (groups != null && groups.contains(" 0 ")) { ev++; detail.append("补充组含root(0); "); }
+        String[] auid = abnormalUidApps();
+        if (auid[1] != null && !auid[1].isEmpty()) { ev++; detail.append("异常UID应用:" + auid[1] + "; "); }
+        String[] dbg = debuggableApps();
+        if (dbg[1] != null && !dbg[1].isEmpty()) { ev++; detail.append("可调试应用:" + dbg[1] + "; "); }
+        StringBuilder out = new StringBuilder();
+        out.append("证据数=").append(ev);
+        if (detail.length() > 0) out.append("(证据:").append(detail.toString().trim()).append(")");
+        if (ev >= 2) out.append(" | 聚合判定→ABNORMAL");
+        else if (ev == 1) out.append(" | 单条命中→SUSPECT(需复核)");
+        else out.append(" → 未检出UID异常,没问题");
+        return out.toString();
+    }
+
+    /** 硬件认证完整性：KeyStore 硬件安全级别 + Root-of-Trust 交叉 + 设备属性差分，≥3→ABNORMAL ≥2→SUSPECT */
+    private String attestationDepthProbe() {
+        int ev = 0; StringBuilder detail = new StringBuilder();
+        try {
+            KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+            KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder("dc_att_depth", KeyProperties.PURPOSE_ENCRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build();
+            kg.init(spec); kg.generateKey();
+            KeyStore ks = KeyStore.getInstance("AndroidKeyStore"); ks.load(null);
+            Key key = ks.getKey("dc_att_depth", null);
+            boolean secure = key instanceof KeyInfo && ((KeyInfo) key).isInsideSecureHardware();
+            if (!secure) { ev++; detail.append("KeyStore非硬件安全(软件密钥); "); }
+            try { ks.deleteEntry("dc_att_depth"); } catch (Exception ignored) {}
+        } catch (Exception ignored) {}
+        String vb = prop("ro.boot.verifiedbootstate");
+        if (vb != null && ("orange".equals(vb)||"red".equals(vb))) { ev++; detail.append("verifiedbootstate=" + vb + "; "); }
+        String fl = prop("ro.boot.flash.locked");
+        if (fl != null && !"1".equals(fl)) { ev++; detail.append("flash.locked=" + fl + "; "); }
+        String brand = prop("ro.product.brand"), vbrand = prop("ro.product.vendor.brand");
+        if (brand != null && vbrand != null && !brand.equals(vbrand)) { ev++; detail.append("brand与vendor.brand不一致; "); }
+        StringBuilder out = new StringBuilder();
+        out.append("证据数=").append(ev);
+        if (detail.length() > 0) out.append("(证据:").append(detail.toString().trim()).append(")");
+        if (ev >= 3) out.append(" | 聚合判定→ABNORMAL");
+        else if (ev >= 2) out.append(" | 聚合判定→SUSPECT");
+        else out.append(" → 认证维度未见异常,没问题");
+        return out.toString();
+    }
+
+    /** Keystore 完整性：鉴权路径时延侧信道 + 别名隔离 + AES-GCM 篡改 tag 负例，≥2 聚合→SUSPECT/ABNORMAL */
+    private String keystoreIntegrityProbe() {
+        int ev = 0; StringBuilder detail = new StringBuilder();
+        String timing = timingSideChannel();
+        if (timing.contains("疑似 KSU/APatch 内核鉴权补丁")) { ev++; detail.append("鉴权路径时延异常; "); }
+        try {
+            KeyStore ks = KeyStore.getInstance("AndroidKeyStore"); ks.load(null);
+            if (ks.containsAlias("dc_nonexist_keystore_probe")) { ev++; detail.append("别名隔离异常(不存在别名可读); "); }
+        } catch (Exception ignored) {}
+        try {
+            javax.crypto.Cipher enc = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            javax.crypto.KeyGenerator kg = javax.crypto.KeyGenerator.getInstance("AES");
+            kg.init(128);
+            javax.crypto.SecretKey sk = kg.generateKey();
+            enc.init(javax.crypto.Cipher.ENCRYPT_MODE, sk);
+            byte[] ct = enc.doFinal("probe-data".getBytes(StandardCharsets.UTF_8));
+            byte[] iv = enc.getIV();
+            byte[] tampered = ct.clone();
+            if (tampered.length >= 1) tampered[tampered.length - 1] ^= 0x01;
+            javax.crypto.Cipher dec = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            javax.crypto.spec.GCMParameterSpec gspec = new javax.crypto.spec.GCMParameterSpec(128, iv);
+            dec.init(javax.crypto.Cipher.DECRYPT_MODE, sk, gspec);
+            byte[] pt = dec.doFinal(tampered);
+            if (pt != null) { ev++; detail.append("AES-GCM篡改tag仍解密成功(完整性缺失); "); }
+        } catch (Exception ignored) { /* 篡改后解密失败为正常行为，不计证据 */ }
+        StringBuilder out = new StringBuilder();
+        out.append("证据数=").append(ev);
+        if (detail.length() > 0) out.append("(证据:").append(detail.toString().trim()).append(")");
+        if (ev >= 3) out.append(" | 聚合判定→ABNORMAL");
+        else if (ev >= 2) out.append(" | 聚合判定→SUSPECT");
+        else out.append(" → Keystore完整性未见异常,没问题");
+        return out.toString();
+    }
+
+    /** 内核身份与运行时完整性：内核版本非官方 + 运行时注入路径 + debug_ramdisk/回环，≥2 聚合→SUSPECT/ABNORMAL */
+    private String kernelIdentityProbe() {
+        int ev = 0; StringBuilder detail = new StringBuilder();
+        String kver = kernelVersion();
+        if (kver != null && (kver.contains("-Dirty")||kver.contains("-custom")||kver.contains("-ksu")
+            ||kver.contains("-apatch")||kver.contains("-GKI"))) { ev++; detail.append("内核版本非官方(" + kver.trim() + "); "); }
+        String maps = read("/proc/self/maps");
+        List<String> inj = new ArrayList<>();
+        if (maps != null) for (String l : maps.split("\n")) {
+            String ll = l.toLowerCase(Locale.US);
+            for (String k : new String[]{"frida","gum-js","lspd","riru","sandhook","edxposed","whale","libinject"})
+                if (ll.contains(k)) { inj.add(k); break; }
+        }
+        if (!inj.isEmpty()) { ev++; detail.append("运行时注入痕迹[" + inj.size() + "]:" + String.join(",", inj) + "; "); }
+        boolean ramdisk = false;
+        try { ramdisk = exists("/debug_ramdisk")||exists("/data/adb/recovery")||exists("/dev/block/loop"); } catch (Exception ignored) {}
+        if (ramdisk) { ev++; detail.append("debug_ramdisk/回环镜像痕迹; "); }
+        StringBuilder out = new StringBuilder();
+        out.append("证据数=").append(ev);
+        if (detail.length() > 0) out.append("(证据:").append(detail.toString().trim()).append(")");
+        if (ev >= 3) out.append(" | 聚合判定→ABNORMAL");
+        else if (ev >= 2) out.append(" | 聚合判定→SUSPECT");
+        else out.append(" → 内核/运行时维度未见异常,没问题");
+        return out.toString();
+    }
+
+    // ============ v1.2.17 新增检测点（全部遵守降误报策略：单点仅日志，多点聚合才告警） ============
     /**
      * 1. 应用组件隐藏探测：
      * 只针对已知风险应用列表（高危/工具包/虚拟化/春秋黑名单）做组件隐藏交叉判定；

@@ -1,6 +1,6 @@
 # 做梦 · 环境检测 (dream-compose)
 
-一款基于 Jetpack Compose + Material 3 的 Android 设备环境检测工具，覆盖 **345 项**离线/在线检测点，帮助判断设备是否存在 Root、Hook、模拟器、多开、隐藏应用等异常环境。
+一款基于 Jetpack Compose + Material 3 的 Android 设备环境检测工具，覆盖 **355 项**离线/在线检测点，帮助判断设备是否存在 Root、Hook、模拟器、多开、隐藏应用等异常环境。
 
 ## 功能特性
 
@@ -49,6 +49,31 @@ gradle assembleRelease
 ```
 
 ## 误报修复记录
+
+### v1.2.21
+**HMA 输入法误报修复（#152/#156）**
+- 输入法良性白名单升级为前缀模糊匹配：微信输入法 `com.tencent.wetype`、百度输入法 `com.baidu.input*`、搜狗输入法 `com.sohu.inputmethod*`、Gboard `com.google.android.inputmethod*`、讯飞/QQ 输入法等。
+- 修复逻辑缺陷：默认输入法包名仅代表「系统选中的输入法」，不能作为「应用被隐藏」的证据；命中良性输入法直接输出 INFO 基线日志并跳过可疑判定。
+- HMA 三源交叉比对同步过滤良性输入法/已知组件，消除输入法误报为隐藏应用的问题。
+
+**风险应用探测失效修复**
+- 应用枚举改为双数据源：`getInstalledPackages()` + `getInstalledApplications(GET_META_DATA)` 并读取 App 元数据（标签），应对包名改名/包可见性导致的探测失效。
+- 探测目标：Alpha(Magisk Alpha)、爱玩机工具箱(`com.byyoung.setting`/`com.nenya.aiwanji`)、Scene(`com.omarea.vtools`)、KernelSU 管理器(`me.weishu.kernelsu`/`com.rifsxd.ksunext` 等)。
+- KernelSU 增加底层痕迹探测：`/data/adb/ksud`、su 二进制、内核属性标记、`/dev/ksu`、dmesg，不只依赖 APP 包名。
+- 判定策略：单独匹配包名/标签仅算弱证据，≥2 条来源独立证据才 SUSPECT，防止误报。
+
+**新增检测点（聚合判定，弱特征仅日志、多证据聚合）**
+- 春秋附录B 风险路径/文件全量扫描、春秋附录C 系统属性基线。
+- 外挂驱动检测：可疑 `.ko` 驱动文件、内核模块驱动签名、`/dev` 外挂节点、驱动模块目录。
+- 扫盘检测：跨高风险目录扫描作弊/工具特征文件，异常则报错、无则报没问题。
+- 路径检测：su 二进制、可疑挂载、隐藏 `.ext` 目录、`/system` 可写、debug_ramdisk，异常则报错、无则报没问题。
+- UID 检测：当前 UID、能力位 CapEff、补充组、异常 UID 应用、可调试应用，异常则报错、无则报没问题。
+- 硬件认证完整性、Keystore 完整性（鉴权路径时延侧信道/别名隔离/AES-GCM 篡改 tag 负例）、内核身份与运行时完整性。
+- 风险工具多证据聚合探测（包名/标签元数据/KSU 底层痕迹/进程，≥2 证据聚合）。
+
+**版本与总量**
+- 版本升级至 v1.2.21（versionCode 23）；离线检测点增至 349、总量 355。
+- 底部导航：关闭联网检测时完全隐藏「在线检测」Tab，仅保留「离线检测 / 设置」；开启后完整展示 3 个 Tab；本地/在线进度与结果完全隔离。
 
 ### v1.2.20
 **UI 流程修复**
