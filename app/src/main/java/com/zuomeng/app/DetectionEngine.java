@@ -39,7 +39,7 @@ import java.util.regex.Pattern;
 import javax.crypto.KeyGenerator;
 
 /**
- * 做梦环境检测引擎 v1.2.18
+ * 做梦环境检测引擎 v1.2.19
  * 整合：zuomeng_check.sh 34 节 + 春秋检测(Chunqiu)全部检测项(含附录A/B/C) + DuckDetector 15 大检测域可行探针
  * 检测点总数约 250，全部在子线程执行；需要 root/native 的探针以"受限(LOW)"级别如实记录。
  */
@@ -51,9 +51,9 @@ public class DetectionEngine {
     }
 
     /** 检测点总数：离线检测点 + 联网检测点，与 run()/runOnline() 实际输出一致 */
-    public static final int TOTAL = 330;
+    public static final int TOTAL = 340;
     /** 离线检测点（第一页，不联网） */
-    public static final int TOTAL_OFFLINE = 324;
+    public static final int TOTAL_OFFLINE = 334;
     /** 联网检测点（第二页） */
     public static final int TOTAL_ONLINE = 6;
 
@@ -824,7 +824,9 @@ public class DetectionEngine {
         boolean adbHit = adbLs != null && (adbLs.contains("magisk")||adbLs.contains("ksu")||adbLs.contains("ap")||adbLs.contains("modules")||adbLs.contains("lspd"));
         r(cat,"/data/adb 内容", adbLs==null||adbLs.trim().isEmpty()?"不存在或不可读":adbLs.replace('\n',' ').trim(), adbHit?1:0);
         String susDir = shExec("find /data/local /data /sdcard /storage/emulated/0 -maxdepth 3 -type d 2>/dev/null | grep -iE '/(root|su$|magisk|ksu$|apatch|tricky|hidden|hide|payload|clone|virtual|proxy|hook|spoof|backup|tmp_tool)' | head -8");
-        r(cat,"全盘异常目录名", susDir==null||susDir.trim().isEmpty()?"未见":susDir.replace('\n',' ').trim(), susDir!=null&&!susDir.trim().isEmpty()?2:0);
+        boolean susDirHit = susDir != null && !susDir.trim().isEmpty();
+        // 单特征：仅记录日志，不单独 SUSPECT；需搭配其他独立风险证据聚合
+        r(cat,"全盘异常目录名", susDirHit ? susDir.replace('\n',' ').trim()+" (单特征仅记录,需其他独立证据聚合,不计风险分)" : "未见", 0);
         String writableSys = shExec("find /system /vendor /product -maxdepth 2 -type d -perm -o+w 2>/dev/null | head -6");
         r(cat,"系统目录可写", writableSys==null||writableSys.trim().isEmpty()?"未见":writableSys.replace('\n',' ').trim(), writableSys!=null&&!writableSys.trim().isEmpty()?1:0);
         String symLink = shExec("find /system /vendor /product -maxdepth 4 -type l 2>/dev/null | grep -iE '/su$|magisk|ksu|apatch|root|tricky|hook' | head -6");
@@ -847,9 +849,26 @@ public class DetectionEngine {
         // ===== 24. 系统服务 / 杂项 =====
         cat = "系统服务";
         StringBuilder svcHit = new StringBuilder();
-        if (serviceOut != null) for (String k : new String[]{"frida","lspd","xposed","magisk","ksu","apatch","shizuku","thanox","scene","tricky","zygisk","clash","proxy"})
-            if (serviceOut.toLowerCase().contains(k)) svcHit.append(k).append(' ');
-        r(cat,"可疑系统服务", svcHit.length()>0?svcHit.toString().trim():"未见", svcHit.length()>0?2:0);
+        StringBuilder svcWeak = new StringBuilder();
+        if (serviceOut != null) {
+            String svcLow = serviceOut.toLowerCase();
+            for (String k : new String[]{"frida","lspd","xposed","magisk","ksu","apatch","shizuku","thanox","tricky","zygisk"})
+                if (svcLow.contains(k)) svcHit.append(k).append(' ');
+            for (String k : new String[]{"scene","clash","proxy"})
+                if (svcLow.contains(k)) svcWeak.append(k).append(' ');
+        }
+        String svcLog;
+        boolean svcAlert;
+        if (svcHit.length() > 0) {
+            svcLog = "命中:" + svcHit.toString().trim()
+                    + (svcWeak.length() > 0 ? " [弱特征佐证:" + svcWeak.toString().trim() + "]" : "");
+            svcAlert = true;
+        } else if (svcWeak.length() > 0) {
+            svcLog = "弱特征仅记录:" + svcWeak.toString().trim()
+                    + " (scene proxy等可能为残留/同名/厂商原生行为,单特征不告警,需其他root/篡改证据聚合)";
+            svcAlert = false;
+        } else { svcLog = "未见"; svcAlert = false; }
+        r(cat,"可疑系统服务", svcLog, svcAlert?2:0);
         r(cat,"服务列表总数", serviceOut==null?"不可读":countLines(serviceOut)+"个", 0);
         String initComm = read("/proc/1/comm");
         r(cat,"init 进程", initComm==null?"不可读":initComm.trim(), (initComm!=null&&!initComm.trim().equals("init"))?2:0);
@@ -867,7 +886,7 @@ public class DetectionEngine {
         String totalProps = shExec("getprop 2>/dev/null | wc -l");
         r(cat,"系统属性总数", totalProps==null?"不可读":totalProps.trim()+"个", 0);
         String kd = keystoreDepth();
-        r(cat,"KeyStore 硬件安全级别(KeyInfo)", kd, kd.contains("软件")?2:0);
+        r(cat,"KeyStore 硬件安全级别(KeyInfo)", kd, kd.startsWith("TEE_FAIL")?2:0);
         r(cat,"KeyStore attestation 尝试", attestationProbe(), 0);
         r(cat,"StrongBox 安全元件", strongBoxProbe(), 0);
         String nl = netlinkCheck();
@@ -901,8 +920,11 @@ public class DetectionEngine {
         r(cat,"/proc/modules 可读性", pm2!=null?(countLines(pm2)+" 个模块(普通应用可读,策略异常开放)"):"不可读(正常)", 0);
         try {
             double r1 = ((double) statTime(new File("/data/adb"))) / Math.max(1.0, (double) statTime(new File("/system/etc/hosts")));
-            boolean slow = r1 > 1.6;
-            r(cat,"KO 时延侧信道(/data/adb)", "stat时延比="+String.format(Locale.US,"%.2f",r1)+(slow?" → 疑似内核 hook(仅记录)":""), slow?3:0);
+            // 阈值上调：延时比 >5 才视为可疑候选；≤5 仅 INFO 不告警。即使 >5 也不单点 SUSPECT，需其他独立证据聚合。
+            boolean cand = r1 > 5.0;
+            String sideLog = "stat时延比=" + String.format(Locale.US,"%.2f",r1)
+                    + (cand ? " → 可疑候选(>5,仅记录,需其他独立证据聚合,不单点告警)" : " (≤5,INFO不告警)");
+            r(cat,"KO 时延侧信道(/data/adb)", sideLog, cand?3:0);
         } catch (Exception e) { r(cat,"KO 时延侧信道(/data/adb)", "探测失败:"+e.getClass().getSimpleName(), 0); }
 
         // ===== 26. Zygisk / AP 超级密钥 / 侧信道补充 =====
@@ -1262,6 +1284,77 @@ public class DetectionEngine {
         String zsTrace = zygiskShamikoTrace();
         r(cat,"Zygisk/Shamiko间接痕迹聚合", zsTrace, zsTrace.startsWith("Zygisk/Shamiko痕迹聚合:多特征命中")?2:0);
 
+        // ===== v1.2.19 新增检测点（多维度补强；弱特征仅日志，≥2 独立证据才聚合告警；读失败→能力受限） =====
+        cat = "v1.2.19 新增";
+        // 1) 启动链 & 完整性（基线日志采集，异常需多证据）
+        String vbState = prop("ro.boot.verifiedbootstate");
+        String vbDev = prop("ro.boot.vbmeta.device_state");
+        String flashLocked = prop("ro.boot.flash.locked");
+        String buildTags = prop("ro.build.tags");
+        r(cat,"启动链 verified-boot/vbmeta 基线",
+                "verifiedbootstate=" + (vbState==null?"不可读":vbState)
+                + " vbmeta_dev=" + (vbDev==null?"不可读":vbDev)
+                + " flash_locked=" + (flashLocked==null?"不可读":flashLocked)
+                + " build_tags=" + (buildTags==null?"不可读":buildTags), 0);
+        String cmdline = read("/proc/cmdline");
+        r(cat,"kernel cmdline bootargs 基线", cmdline==null?"不可读":cmdline.trim(), 0);
+        String secPatch = prop("ro.build.version.security_patch");
+        String vendorPatch = prop("ro.vendor.build.security_patch");
+        r(cat,"security-patch vendor/system 一致性", "system=" + secPatch + " vendor=" + vendorPatch, 0);
+
+        // 2)+4)+5) 共享：/proc/self/maps 与 status/environ 一次读取
+        String maps19 = read("/proc/self/maps");
+        String status19 = read("/proc/self/status");
+        int tracerPid = 0;
+        if (status19 != null) for (String l : status19.split("\n"))
+            if (l.startsWith("TracerPid:")) { try { tracerPid = Integer.parseInt(l.trim().split("\\s+")[1]); } catch (Exception ignored) {} }
+        // Native 注入/Hook 痕迹聚合（maps 关键字 + TracerPid + LD_PRELOAD）
+        int natHits = 0; StringBuilder natDetail = new StringBuilder();
+        if (maps19 != null) {
+            String ml = maps19.toLowerCase();
+            for (String k : new String[]{"frida","gum-js-loop","linjector","lspd","riru","sandhook","epic","edxposed"})
+                if (ml.contains(k)) { natHits++; natDetail.append(k).append(' '); }
+        }
+        if (tracerPid > 0) { natHits++; natDetail.append("TracerPid=").append(tracerPid).append(' '); }
+        String env19 = read("/proc/self/environ");
+        if (env19 != null && env19.toLowerCase().contains("ld_preload")) { natHits++; natDetail.append("LD_PRELOAD "); }
+        r(cat,"Native注入/Hook痕迹聚合",
+                natHits==0 ? "未检出独立注入痕迹" : natDetail.toString().trim() + " (" + natHits + "个独立证据)",
+                natHits>=2 ? 2 : 0);
+
+        // 3) SELinux & 内核痕迹（弱特征仅记录）
+        String enforce = shExec("getenforce 2>/dev/null");
+        r(cat,"SELinux 运行模式", enforce==null?"能力受限(getenforce 不可执行)":enforce.trim()+" (弱特征,Permissive需配合其他证据)", 0);
+        String modules = read("/proc/modules");
+        r(cat,"内核模块残留指纹", modules==null ? "能力受限(普通应用不可读 /proc/modules)" : "可读("+countLines(modules)+"个,策略偏开放,仅记录)", 0);
+
+        // ART/Xposed 运行时痕迹（弱特征，不单点告警）
+        int artHits = 0; StringBuilder artDetail = new StringBuilder();
+        if (maps19 != null) {
+            String ml = maps19.toLowerCase();
+            if (ml.contains("lspd")||ml.contains("edxposed")||ml.contains("riru")) { artHits++; artDetail.append("maps-Xposed "); }
+        }
+        r(cat,"ART/Xposed 运行时痕迹",
+                artHits==0 ? "未检出独立Xposed运行时痕迹" : artDetail.toString().trim()+" ("+artHits+"个,需聚合)",
+                artHits>=2 ? 2 : 0);
+
+        // 调试/Frida 痕迹聚合（TracerPid + 27042端口）
+        int dbgHits = 0; StringBuilder dbgDetail = new StringBuilder();
+        if (tracerPid > 0) { dbgHits++; dbgDetail.append("ptrace被调试 "); }
+        String tcp = read("/proc/net/tcp");
+        if (tcp != null && tcp.contains("69A2")) { dbgHits++; dbgDetail.append("Frida默认端口27042 "); }
+        r(cat,"调试/Frida痕迹聚合",
+                dbgHits==0 ? "未检出调试/Frida痕迹" : dbgDetail.toString().trim()+" ("+dbgHits+"个独立证据)",
+                dbgHits>=2 ? 2 : 0);
+
+        // 6) 系统目录可写性试探（弱特征）
+        boolean sysWritable = new File("/system").canWrite();
+        r(cat,"系统目录可写性试探", "/system canWrite=" + sysWritable + (sysWritable ? " (弱特征,需聚合)" : " (正常只读)"), 0);
+
+        // 7) 传统 root 二进制路径（仅日志采集，不单点告警）
+        String suPaths = shExec("for p in /system/bin/su /system/xbin/su /debug_ramdisk/su /sbin/su; do [ -e $p ] && echo -n \"$p \"; done 2>/dev/null");
+        r(cat,"现代root二进制路径扫描", (suPaths==null||suPaths.trim().isEmpty()) ? "未见" : suPaths.trim()+" (仅日志采集,不单点告警)", 0);
+
         Report rep = new Report();
         rep.results = results;
         rep.total = cn; rep.clean = clean; rep.found = found; rep.warn = warn; rep.low = low;
@@ -1322,10 +1415,24 @@ public class DetectionEngine {
 
     private String mountinfoSuspicious(String mountinfo) {
         if (mountinfo == null) return "不可读";
-        StringBuilder h = new StringBuilder();
-        for (String k : new String[]{"magisk","ksu","apatch","tricky","zygisk","frida","/data/adb","hide","spoof"})
-            if (mountinfo.toLowerCase().contains(k)) h.append(k).append(' ');
-        return h.length() > 0 ? "命中:"+h.toString().trim() : "未见异常";
+        StringBuilder strong = new StringBuilder();
+        StringBuilder weak = new StringBuilder();
+        String ml = mountinfo.toLowerCase();
+        // 强证据：root/hook 相关挂载路径
+        for (String k : new String[]{"magisk","ksu","apatch","tricky","zygisk","frida","/data/adb"})
+            if (ml.contains(k)) strong.append(k).append(' ');
+        // 弱证据：hide/spoof 标记（厂商系统原生挂载常见，单特征不告警）
+        for (String k : new String[]{"hide","spoof"})
+            if (ml.contains(k)) weak.append(k).append(' ');
+        if (strong.length() > 0) {
+            return "命中:" + strong.toString().trim()
+                    + (weak.length() > 0 ? " [弱特征佐证:" + weak.toString().trim() + "]" : "");
+        }
+        if (weak.length() > 0) {
+            return "弱特征仅记录:" + weak.toString().trim()
+                    + " (hide标记可能为厂商系统原生挂载行为,单特征不告警,需叠加overlay/bind/root挂载路径等第二证据)";
+        }
+        return "未见异常";
     }
 
     private int anonRwCount(String maps) {
@@ -2083,7 +2190,8 @@ public class DetectionEngine {
         return h.length() > 0 ? "命中:\n" + h.toString().trim() : "未见可疑属性";
     }
 
-    /** KeyStore 硬件安全级别：KeyInfo.isInsideSecureHardware / getSecurityLevel */
+    /** KeyStore 硬件安全级别：KeyInfo.isInsideSecureHardware / getSecurityLevel
+     *  判定：仅软件型密钥但 TEE 硬件背书正常 → 仅日志不告警；仅当 TEE 硬件背书校验失败才告警 */
     private String keystoreDepth() {
         try {
             KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
@@ -2094,12 +2202,26 @@ public class DetectionEngine {
             KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
             ks.load(null);
             Key key = ks.getKey("zuomeng_hw", null);
+            boolean secure = false; int lvl = -1;
             if (key instanceof KeyInfo) {
                 KeyInfo ki = (KeyInfo) key;
-                String lvl = String.valueOf(ki.getSecurityLevel());
-                return "硬件背书=" + ki.isInsideSecureHardware() + " 安全级别=" + lvl;
+                secure = ki.isInsideSecureHardware();
+                lvl = ki.getSecurityLevel();
             }
-            return "非硬件 KeyInfo(疑似软件模拟)";
+            // TEE 硬件背书校验：能否正常生成受 TEE 保护的密钥
+            boolean teeOk = true;
+            try {
+                KeyGenerator kg2 = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+                KeyGenParameterSpec sp2 = new KeyGenParameterSpec.Builder("zuomeng_tee", KeyProperties.PURPOSE_ENCRYPT)
+                        .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                        .build();
+                kg2.init(sp2); kg2.generateKey();
+            } catch (Exception teeE) { teeOk = false; }
+            int softCount = secure ? 0 : 1;
+            String base = "硬件背书=" + secure + " 安全级别=" + lvl + " 软件密钥数=" + softCount
+                    + " TEE背书=" + (teeOk ? "正常" : "校验失败");
+            return teeOk ? ("TEE_OK:" + base + " (仅软件密钥,TEE正常,不告警)")
+                         : ("TEE_FAIL:" + base + " (TEE硬件背书校验失败)");
         } catch (Exception e) { return "受限:" + e.getClass().getSimpleName(); }
     }
 

@@ -11,8 +11,8 @@ android {
         applicationId = "com.zuomeng.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "1.2.18"
+        versionCode = 21
+        versionName = "1.2.19"
     }
 
     buildTypes {
@@ -63,6 +63,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core:1.6.8")
     implementation("androidx.compose.material:material-icons-extended:1.6.8")
     implementation("androidx.compose.foundation:foundation:1.6.8")
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     debugImplementation("androidx.compose.ui:ui-tooling:1.6.8")
 }
