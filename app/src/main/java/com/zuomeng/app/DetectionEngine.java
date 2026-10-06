@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
 import javax.crypto.KeyGenerator;
 
 /**
- * 做梦环境检测引擎 v1.2.23
+ * 做梦环境检测引擎 v1.2.24
  * 整合：zuomeng_check.sh 34 节 + 通用检测项(含附录A/B/C) + 15 大检测域可行探针
  * 检测点总数约 250，全部在子线程执行；需要 root/native 的探针以"受限(LOW)"级别如实记录。
  */
@@ -562,7 +562,8 @@ public class DetectionEngine {
         // ===== 9. 异常应用 =====
         cat = "异常应用";
         String[] dbg = debuggableApps();
-        r(cat,"可调试应用 (debuggable)", "已开启调试 " + dbg[0] + " 个" + (dbg[1].isEmpty() ? "" : " · " + dbg[1]), dbg[1].isEmpty()?0:2);
+        // 可调试应用为弱证据（第三方测试包/工程包常见），单独存在仅 INFO，不告警；真实风险由风险包/进程注入探针聚合判定
+        r(cat,"可调试应用 (debuggable)", "已开启调试 " + dbg[0] + " 个" + (dbg[1].isEmpty() ? "" : " · " + dbg[1]), 0);
         String[] auid = abnormalUidApps();
         r(cat,"异常 UID 应用 (root/system/shell)", "发现 " + auid[0] + " 个" + (auid[1].isEmpty() ? "" : " · " + auid[1]), auid[1].isEmpty()?0:2);
 
@@ -604,9 +605,20 @@ public class DetectionEngine {
         String acc = null;
         try { acc = Settings.Secure.getString(ctx.getContentResolver(), "enabled_accessibility_services"); } catch (Exception ignored) {}
         if (acc != null && !acc.isEmpty()) {
-            boolean sus = false;
-            for (String k : ACCESS_SUS) if (acc.toLowerCase().contains(k)) { sus = true; break; }
-            r(cat,"无障碍服务", acc, sus?1:2);
+            // 只检测已知风险黑名单包的无障碍服务；厂商/普通系统无障碍(自动填充/键盘/手势等)一律正常基线，不再按关键词误报
+            String[] services = acc.split(":");
+            StringBuilder risk = new StringBuilder();
+            StringBuilder benign = new StringBuilder();
+            for (String s : services) {
+                String pkg = s.trim().split("/")[0].trim();
+                if (pkg.isEmpty()) continue;
+                if (isRiskPkg(pkg)) risk.append(s.trim()).append(' ');
+                else if (benign.indexOf(pkg) < 0) benign.append(pkg).append(' ');
+            }
+            String log = risk.length() > 0
+                    ? ("检出风险包无障碍服务:" + risk.toString().trim())
+                    : (benign.length() > 0 ? ("无障碍服务均为系统/普通应用(仅基线):" + benign.toString().trim()) : acc);
+            r(cat, "无障碍服务", log, risk.length() > 0 ? 2 : 0);
         } else r(cat,"无障碍服务","未开启",0);
 
         // ===== 12. 系统设置 =====
@@ -686,7 +698,8 @@ public class DetectionEngine {
         }
         r(cat,"tmpfs 覆盖系统分区", tmpfsSys?"tmpfs 覆盖 /system/vendor":"未见", tmpfsSys?2:0);
         String mGap = mountGapCheck(mountinfo);
-        r(cat,"挂载 ID 间隙", mGap, mGap.startsWith("存在")?2:0);
+        // 挂载 ID 间隙为 Android Apex/动态分区/厂商 ROM 原生现象，仅 INFO 基线，不告警；真实隐藏挂载由强关键字挂载探针判定
+        r(cat,"挂载 ID 间隙", mGap, 0);
         int bindCount = mountinfo == null ? 0 : countOccurrences(mountinfo, " bind ");
         int ovCount = mountinfo == null ? 0 : countOccurrences(mountinfo, " overlay ");
         r(cat,"bind/overlay 挂载统计", "bind="+bindCount+" overlay="+ovCount, (bindCount+ovCount)>30?2:0);
@@ -989,7 +1002,7 @@ public class DetectionEngine {
         try { acc2 = Settings.Secure.getString(ctx.getContentResolver(), "enabled_accessibility_services"); } catch (Exception ignored) {}
         int accN = 0;
         if (acc2 != null && !acc2.isEmpty()) accN = acc2.split(":").length;
-        r(cat,"无障碍服务数量", accN==0?"未开启":accN+" 个", accN>3?2:0);
+        r(cat,"无障碍服务数量", accN==0?"未开启":accN+" 个", 0);
         String ime = readSetting("secure","enabled_input_methods");
         boolean imeBad = ime != null && (ime.toLowerCase().contains("hook")||ime.toLowerCase().contains("macro"));
         r(cat,"输入法钩子检测", ime==null||ime.isEmpty()?"未启用":ime, imeBad?2:0);
@@ -1001,7 +1014,7 @@ public class DetectionEngine {
         // ===== 31. 挂载间隙补充 =====
         cat = "挂载";
         String pg = peerGroupGap(mountinfo);
-        r(cat,"peer-group 挂载组间隙", pg, pg.contains("间隙")?2:0);
+        r(cat,"peer-group 挂载组间隙", pg, 0);
 
         // ===== 32. DRM / 低风险扫描（命中才标低风险） =====
         cat = "DRM";
@@ -2226,9 +2239,33 @@ public class DetectionEngine {
      * 命中白名单的包仅记录日志文本，绝对禁止输出 ABNORMAL 异常等级，不能被标记为风险应用。
      * 前缀匹配：cn.nubia.* ；精确匹配：com.redteamobile.virtual.softsim
      */
-    private static final String[] APP_PKG_WHITELIST_PREFIXES = { "cn.nubia." };
+    private static final String[] APP_PKG_WHITELIST_PREFIXES = {
+        "cn.nubia.",
+        "com.android.virtualization.",   // 红魔/安卓系统内置虚拟化组件（用户空间虚拟化）
+        "com.android.virtualmachine.",
+        "com.android.virtual.",
+        "com.oplus.",                    // Oplus/ColorOS 系厂商原生组件
+        "com.coloros.",
+        "com.oneplus.",
+        "com.vivo.",
+        "com.xiaomi.",
+        "com.miui.",
+        "com.huawei.",
+        "com.oppo.",
+        "com.realme.",
+        "com.samsung.",
+        "com.bbk.",
+        "com.iqoo.",
+        "com.transsion.",
+        "com.nubia."
+    };
     private static final Set<String> APP_PKG_WHITELIST_EXACT = new HashSet<>(java.util.Arrays.asList(
-            "com.redteamobile.virtual.softsim"
+            "com.redteamobile.virtual.softsim",
+            "com.android.virtualmachine.res",
+            "com.android.virtualization.terminal",
+            "com.oplus.autofill.service",
+            "com.coloros.codebook",
+            "com.google.android.inputmethod.latin"
     ));
 
     /** 是否命中系统应用白名单（通配前缀 + 精确匹配） */
@@ -2290,6 +2327,8 @@ public class DetectionEngine {
             if (l.contains("dalvik.vm.heapsize") || l.contains("dalvik.vm.startup")) continue;
             boolean hit = false;
             for (String k : keys) if (l.contains(k)) { hit = true; break; }
+            // 厂商原生属性白名单：Oplus/ColorOS/一加/努比亚 等音频、系统组件自带的 hook/spoof/audio 标记为原生基线，不计入风险
+            if (hit && isVendorBenignProp(l)) continue;
             // dex2oat 单独处理：只查 dex2oat-flags 这种被篡改的标志，不查 Xms/Xmx 等原生参数
             if (!hit && l.contains("dex2oat") && !l.contains("dex2oat-flags")) continue;
             if (hit) {
@@ -2298,6 +2337,19 @@ public class DetectionEngine {
             }
         }
         return h.length() > 0 ? "命中:\n" + h.toString().trim() : "未见可疑属性";
+    }
+
+    /** 厂商原生属性判定：Oplus/ColorOS/一加/努比亚/红魔 等厂商系统组件的弱关键词属性视为原生基线 */
+    private boolean isVendorBenignProp(String l) {
+        String[] vendor = {"oplus","coloros","oneplus","nubia","realme","oppo","vivo","xiaomi","miui",
+                "huawei","samsung","iqoo","bbk","transsion","google","qualcomm","qcom","vendor.oplus"};
+        boolean v = false;
+        for (String p : vendor) if (l.contains(p)) { v = true; break; }
+        if (!v) return false;
+        // 仅弱关键词(厂商常见音频/系统钩子)按原生基线跳过；magisk/ksu/apatch/frida/xposed 等强关键词即使厂商前缀也仍命中
+        for (String strong : new String[]{"magisk","ksu","apatch","frida","xposed","tricky","susfs","zygisk","pihooks","pixelprops"})
+            if (l.contains(strong)) return false;
+        return true;
     }
 
     /** KeyStore 硬件安全级别：KeyInfo.isInsideSecureHardware / getSecurityLevel
@@ -2510,26 +2562,20 @@ public class DetectionEngine {
         return "未发现";
     }
 
-    /** 系统应用包名 hook/作弊关键字（强关键字全量命中；弱关键字仅对非 OEM 应用生效，避免厂商组件误报） */
+    /** 系统应用包名 hook/作弊关键字（仅命中强黑名单关键字；弱关键字不再对系统应用生效，厂商组件一律不误报） */
     private String systemAppHookScan() {
         StringBuilder h = new StringBuilder();
         StringBuilder wl = new StringBuilder();
+        // 仅强黑名单关键字（无歧义）：命中才可能标记；"virtual/hook/hide/clone" 等弱关键字对系统应用一律不算，避免厂商组件误报
         String[] strong = {"magisk","supersu","superuser","ksu","apatch","xposed","lspd","lsposed","frida"};
-        String[] weak = {"hook","fakelocation","deviceid","cloner","virtual","hide"};
         try {
             List<ApplicationInfo> apps = ctx.getPackageManager().getInstalledApplications(0);
             for (ApplicationInfo ai : apps) {
                 if ((ai.flags & ApplicationInfo.FLAG_SYSTEM) == 0) continue;
                 if (OEM_WHITELIST.contains(ai.packageName)) continue;
                 String n = ai.packageName.toLowerCase();
-                boolean oem = n.startsWith("com.oplus.")||n.startsWith("com.vivo.")||n.startsWith("com.xiaomi.")
-                        ||n.startsWith("com.huawei.")||n.startsWith("com.oppo.")||n.startsWith("com.oneplus.")
-                        ||n.startsWith("com.realme.")||n.startsWith("com.samsung.")||n.startsWith("com.miui.")
-                        ||n.startsWith("com.coloros.")||n.startsWith("com.bbk.")||n.startsWith("com.iqoo.")
-                        ||n.startsWith("com.transsion.")||n.startsWith("com.oplus.");
                 boolean hit = false;
                 for (String k : strong) if (n.contains(k)) { hit = true; break; }
-                if (!hit && !oem) for (String k : weak) if (n.contains(k)) { hit = true; break; }
                 if (!hit) continue;
                 // 命中系统应用白名单：绝对禁止输出 ABNORMAL，仅记录日志，不标记为风险应用
                 if (isAppPkgWhitelisted(ai.packageName)) { wl.append(ai.packageName).append(' '); continue; }

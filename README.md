@@ -50,6 +50,19 @@ gradle assembleRelease
 
 ## 误报修复记录
 
+### v1.2.24
+**全面降误报：应用/无障碍检测改为「只命中已知风险黑名单包」，厂商自带应用一律正常基线**
+- **系统虚拟化白名单**：`com.android.virtualmachine.res`、`com.android.virtualization.terminal` 及 `com.android.virtualization.*` 前缀加入白名单——红魔/安卓系统内置虚拟化组件不再被标记异常（修复 #257）。
+- **系统应用 hook 关键字检测（#257）**：改为只命中强黑名单关键字（magisk/ksu/apatch/xposed/lspd/frida 等）；`virtual/hook/hide/clone` 等弱关键字不再对系统应用生效，彻底消除厂商组件误报。
+- **无障碍服务检测（#144）**：改为只检测已知风险黑名单包的无障碍服务；Oplus/ColorOS 原生自动填充、系统手势/键盘等一律视为正常基线（修复 `com.oplus.autofill.service`、`com.coloros.codebook` 误报）。
+- **厂商前缀白名单**：`com.oplus.*`、`com.coloros.*`、`com.oneplus.*`、`com.vivo.*`、`com.xiaomi.*`、`com.huawei.*`、`com.samsung.*`、`com.nubia.*` 等厂商原生包前缀统一加入白名单。
+- **挂载 ID 间隙 / peer-group 挂载组间隙**：Android Apex、动态分区原生现象，降为 INFO 基线不再告警（修复 #169）；真实隐藏挂载由强关键字挂载探针判定。
+- **可调试应用**：单独存在为弱证据（测试/工程包常见），降为 INFO 不再单条 SUSPECT（修复 #129/#346）；真实风险由风险包/进程注入探针聚合判定。
+- **属性全量扫描**：Oplus/ColorOS/一加/努比亚等厂商原生属性（含音频 hook 标记）视为基线，弱关键词不再计入风险；magisk/ksu/apatch/frida/xposed 等强关键词仍命中。
+
+**版本与约束**
+- 版本升级至 v1.2.24（versionCode 26）；原有 #172/#219/#228/#236/#246 判定逻辑完全保留，#246 阈值维持 >5。
+
 ### v1.2.23
 **新增检测点（4 项，全部多证据聚合、弱特征仅日志、能力受限不告警，低误报）**
 - **ADB 调试多证据检测**：`Settings.adb_enabled` + 5555 端口监听 + `ro.debuggable` + `adb_keys` 授权文件，≥2 条证据聚合才 SUSPECT。**即使系统 UI 隐藏 ADB 开关、但服务/端口未真正关闭，也能检出 ADB 调试开启**。
